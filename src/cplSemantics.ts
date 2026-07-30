@@ -39,6 +39,14 @@ export type ParamSig = {
   annotations?: string[];
 };
 
+export type CallArg = {
+  type: TypeNode;
+  range: Range;
+  explicitRef?: boolean;
+  requiresExplicitRefForPtr?: boolean;
+  isStringLiteral?: boolean;
+};
+
 export function formatType(t: TypeNode): string {
   switch (t.kind) {
     case "prim":
@@ -474,6 +482,15 @@ function expectedInstanceArityString(fn: FuncOverloadSym): string {
   return `${minArgs}..${maxArgs}`;
 }
 
+function paramForArgument(params: ParamSig[], argIndex: number): ParamSig | undefined {
+  const varIndex = params.findIndex((p) => p.isVarArgs);
+  if (varIndex >= 0 && argIndex >= varIndex) {
+    const varParam = params[varIndex];
+    return varParam.type.kind === "unknown" ? undefined : varParam;
+  }
+  return params[argIndex]?.isVarArgs ? undefined : params[argIndex];
+}
+
 const EXCLUSIVE_MACRO_GROUPS: string[][] = [
   ["CCPL_MACHO64", "CCPL_GNU64", "CCPL_GNUI386", "CCPL_WINDOWS64"]
 ];
@@ -538,9 +555,9 @@ export class SemanticContext {
 
   private currentFilePath: string | undefined;
   private scope: Scope = new Scope();
-  private pendingCalls: { name: string; argc: number; range: Range; filePath?: string; scope: Scope }[] = [];
-  private pendingAssociatedCalls: { containerName: string; name: string; argc: number; range: Range; filePath?: string }[] = [];
-  private pendingInstanceCalls: { containerName: string; name: string; argc: number; range: Range; filePath?: string }[] = [];
+  private pendingCalls: { name: string; args: CallArg[]; range: Range; filePath?: string; scope: Scope }[] = [];
+  private pendingAssociatedCalls: { containerName: string; name: string; args: CallArg[]; range: Range; filePath?: string }[] = [];
+  private pendingInstanceCalls: { containerName: string; name: string; args: CallArg[]; range: Range; filePath?: string }[] = [];
 
   constructor(private readonly options: SemanticContextOptions = {}) {}
 
@@ -1286,17 +1303,57 @@ export class SemanticContext {
     return { status: "ambiguous", candidates: arityMatches };
   }
 
-  callFunc(name: string, argc: number, range: Range) {
+  private noteMissingExplicitRef(arg: CallArg, expected: TypeNode) {
+    const subject = arg.isStringLiteral ? "String literal" : "Stack value";
+    this.issues.push({
+      message: `${subject} requires explicit 'ref' when '${formatType(expected)}' is expected`,
+      range: arg.range
+    });
+  }
+
+  private checkExplicitRefArgs(
+    candidates: FuncOverloadSym[],
+    args: CallArg[],
+    paramsForFn: (fn: FuncOverloadSym) => ParamSig[] = (fn) => fn.params
+  ) {
+    if (candidates.length === 0) return;
+
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i];
+      if (!arg.requiresExplicitRefForPtr || arg.explicitRef) continue;
+
+      const expected = candidates
+        .map((fn) => paramForArgument(paramsForFn(fn), i)?.type)
+        .filter((type): type is TypeNode => type?.kind === "ptr");
+
+      if (expected.length !== candidates.length || expected.length === 0) continue;
+      this.noteMissingExplicitRef(arg, expected[0]);
+    }
+  }
+
+  private checkExplicitRefParamTypes(params: TypeNode[], args: CallArg[]) {
+    for (let i = 0; i < Math.min(params.length, args.length); i++) {
+      const arg = args[i];
+      const expected = params[i];
+      if (expected.kind === "ptr" && arg.requiresExplicitRefForPtr && !arg.explicitRef) {
+        this.noteMissingExplicitRef(arg, expected);
+      }
+    }
+  }
+
+  callFunc(name: string, args: CallArg[], range: Range) {
     if (name === "syscall") return;
-    this.pendingCalls.push({ name, argc, range, filePath: this.currentFilePath, scope: this.scope });
+    const argc = args.length;
+    this.pendingCalls.push({ name, args, range, filePath: this.currentFilePath, scope: this.scope });
     this.upsertCallSite(name, argc, range, this.resolveCall(name, argc, this.scope));
   }
 
-  callNamedOrValue(name: string, argc: number, range: Range) {
+  callNamedOrValue(name: string, args: CallArg[], range: Range) {
     if (name === "syscall") return;
+    const argc = args.length;
 
     if (this.hasFunctionNamed(name)) {
-      this.callFunc(name, argc, range);
+      this.callFunc(name, args, range);
       return;
     }
 
@@ -1310,6 +1367,7 @@ export class SemanticContext {
           });
           return;
         }
+        if (vt.kind === "func") this.checkExplicitRefParamTypes(vt.params, args);
         this.indirectCallSites.push({ argc, range, filePath: this.currentFilePath, calleeType: vt });
         return;
       }
@@ -1320,20 +1378,22 @@ export class SemanticContext {
       return;
     }
 
-    this.callFunc(name, argc, range);
+    this.callFunc(name, args, range);
   }
 
-  callAssociatedMethod(containerName: string, name: string, argc: number, range: Range) {
+  callAssociatedMethod(containerName: string, name: string, args: CallArg[], range: Range) {
     const qualifiedName = this.qualifiedMethodName(containerName, name);
+    const argc = args.length;
     const resolution = this.resolveAssociatedCall(containerName, name, argc);
-    this.pendingAssociatedCalls.push({ containerName, name, argc, range, filePath: this.currentFilePath });
+    this.pendingAssociatedCalls.push({ containerName, name, args, range, filePath: this.currentFilePath });
     this.upsertCallSite(qualifiedName, argc, range, resolution);
   }
 
-  callInstanceMethod(containerName: string, name: string, argc: number, range: Range) {
+  callInstanceMethod(containerName: string, name: string, args: CallArg[], range: Range) {
     const qualifiedName = this.qualifiedMethodName(containerName, name);
+    const argc = args.length;
     const resolution = this.resolveInstanceCall(containerName, name, argc);
-    this.pendingInstanceCalls.push({ containerName, name, argc, range, filePath: this.currentFilePath });
+    this.pendingInstanceCalls.push({ containerName, name, args, range, filePath: this.currentFilePath });
     this.upsertCallSite(qualifiedName, argc, range, resolution);
   }
 
@@ -1346,8 +1406,9 @@ export class SemanticContext {
     });
   }
 
-  callIndirectExpr(calleeType: TypeNode, argc: number, range: Range) {
+  callIndirectExpr(calleeType: TypeNode, args: CallArg[], range: Range) {
     if (calleeType.kind === "unknown") return;
+    const argc = args.length;
 
     if (isCallableType(calleeType)) {
       if (!matchesCallableArity(calleeType, argc)) {
@@ -1357,6 +1418,7 @@ export class SemanticContext {
         });
         return;
       }
+      if (calleeType.kind === "func") this.checkExplicitRefParamTypes(calleeType.params, args);
       this.indirectCallSites.push({ argc, range, filePath: this.currentFilePath, calleeType });
       return;
     }
@@ -1370,9 +1432,10 @@ export class SemanticContext {
   finish() {
     for (const c of this.pendingAssociatedCalls) {
       const qualifiedName = this.qualifiedMethodName(c.containerName, c.name);
-      const resolution = this.resolveAssociatedCall(c.containerName, c.name, c.argc);
+      const argc = c.args.length;
+      const resolution = this.resolveAssociatedCall(c.containerName, c.name, argc);
       if (resolution == undefined) continue;
-      this.upsertCallSite(qualifiedName, c.argc, c.range, resolution, c.filePath);
+      this.upsertCallSite(qualifiedName, argc, c.range, resolution, c.filePath);
 
       if (resolution.status === "unknown") {
         const container = this.containers.get(c.containerName);
@@ -1403,18 +1466,21 @@ export class SemanticContext {
           .join(" | ");
 
         this.issues.push({
-          message: `Call '${qualifiedName}': no matching overload for ${c.argc} args (available: ${expected || "none"})`,
+          message: `Call '${qualifiedName}': no matching overload for ${argc} args (available: ${expected || "none"})`,
           range: c.range
         });
         continue;
       }
+
+      this.checkExplicitRefArgs(resolution.candidates, c.args);
     }
 
     for (const c of this.pendingInstanceCalls) {
       const qualifiedName = this.qualifiedMethodName(c.containerName, c.name);
-      const resolution = this.resolveInstanceCall(c.containerName, c.name, c.argc);
+      const argc = c.args.length;
+      const resolution = this.resolveInstanceCall(c.containerName, c.name, argc);
       if (resolution == undefined) continue;
-      this.upsertCallSite(qualifiedName, c.argc, c.range, resolution, c.filePath);
+      this.upsertCallSite(qualifiedName, argc, c.range, resolution, c.filePath);
 
       if (resolution.status === "unknown") {
         const container = this.containers.get(c.containerName);
@@ -1445,17 +1511,20 @@ export class SemanticContext {
           .join(" | ");
 
         this.issues.push({
-          message: `Call '${c.containerName}.${c.name}': no matching overload for ${c.argc} args (available: ${expected || "none"})`,
+          message: `Call '${c.containerName}.${c.name}': no matching overload for ${argc} args (available: ${expected || "none"})`,
           range: c.range
         });
         continue;
       }
+
+      this.checkExplicitRefArgs(resolution.candidates, c.args, instanceCallParams);
     }
 
     for (const c of this.pendingCalls) {
-      const resolution = this.resolveCall(c.name, c.argc, c.scope);
+      const argc = c.args.length;
+      const resolution = this.resolveCall(c.name, argc, c.scope);
       if (resolution == undefined) continue;
-      this.upsertCallSite(c.name, c.argc, c.range, resolution, c.filePath);
+      this.upsertCallSite(c.name, argc, c.range, resolution, c.filePath);
 
       if (resolution.status === "unknown") {
         this.issues.push({ message: `Unknown function '${c.name}'`, range: c.range });
@@ -1469,12 +1538,13 @@ export class SemanticContext {
           .join(" | ");
 
         this.issues.push({
-          message: `Call '${c.name}': no matching overload for ${c.argc} args (available: ${expected || "none"})`,
+          message: `Call '${c.name}': no matching overload for ${argc} args (available: ${expected || "none"})`,
           range: c.range
         });
         continue;
       }
 
+      this.checkExplicitRefArgs(resolution.candidates, c.args);
     }
 
     this.pendingAssociatedCalls = [];

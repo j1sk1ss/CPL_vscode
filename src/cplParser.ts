@@ -1,5 +1,5 @@
 import { Range, Position } from "vscode-languageserver/node";
-import { SemanticContext, MacroValue, TypeNode, MacroCondition } from "./cplSemantics";
+import { SemanticContext, MacroValue, TypeNode, MacroCondition, CallArg, formatType } from "./cplSemantics";
 import { CplPredefinedMacro } from "./cplTarget";
 
 function buildLineStarts(text: string): number[] {
@@ -172,6 +172,9 @@ type ExprInfo = {
   identName?: string;
   isSyscall?: boolean;
   isTypeName?: boolean;
+  explicitRef?: boolean;
+  requiresExplicitRefForPtr?: boolean;
+  isStringLiteral?: boolean;
   associatedContainerName?: string;
   associatedMethodName?: string;
   instanceContainerName?: string;
@@ -194,6 +197,10 @@ const KEYWORDS = new Set([
 const TYPE_KW = new Set([
   "f64","f32","i64","i32","i16","i8","u64","u32","u16","u8","i0","str","arr","ptr"
 ]);
+
+function valueRequiresExplicitRefForPtr(t: TypeNode): boolean {
+  return t.kind !== "ptr" && t.kind !== "func" && t.kind !== "unknown";
+}
 
 const OPERATORS = [
   "::",
@@ -439,6 +446,7 @@ class Parser {
   private pendingDocRanges: Range[] = [];
   private pendingAnnotations: string[] = [];
   private typeParamScopes: string[][] = [];
+  private returnTypeStack: (TypeNode | undefined)[] = [];
   private ppConditionStack: MacroCondition[];
 
   constructor(
@@ -742,6 +750,38 @@ class Parser {
       range: rangeOf(this.lines, c.start, c.end)
     });
     return false;
+  }
+
+  private exprRange(expr: ExprInfo): Range {
+    const fallback = this.prevNonEOL() ?? this.prev();
+    const start = expr.start ?? fallback.start;
+    const end = expr.end ?? fallback.end;
+    return rangeOf(this.lines, start, Math.max(start, end));
+  }
+
+  private toCallArg(expr: ExprInfo): CallArg {
+    return {
+      type: expr.type,
+      range: this.exprRange(expr),
+      explicitRef: expr.explicitRef,
+      requiresExplicitRefForPtr: expr.requiresExplicitRefForPtr,
+      isStringLiteral: expr.isStringLiteral
+    };
+  }
+
+  private currentReturnType(): TypeNode | undefined {
+    return this.returnTypeStack[this.returnTypeStack.length - 1];
+  }
+
+  private checkExplicitRefForPtrExpected(expected: TypeNode | undefined, expr: ExprInfo) {
+    if (expected?.kind !== "ptr") return;
+    if (!expr.requiresExplicitRefForPtr || expr.explicitRef) return;
+
+    const subject = expr.isStringLiteral ? "String literal" : "Stack value";
+    this.issues.push({
+      message: `${subject} requires explicit 'ref' when '${formatType(expected)}' is expected`,
+      range: this.exprRange(expr)
+    });
   }
 
   private parseProgram() {
@@ -1387,7 +1427,12 @@ class Parser {
       this.sem?.declareLocalVar(p.name, p.type, p.range, { annotations: p.annotations });
     }
 
-    this.parseBlock(true);
+    this.returnTypeStack.push(ret);
+    try {
+      this.parseBlock(true);
+    } finally {
+      this.returnTypeStack.pop();
+    }
 
     this.sem?.exitScope();
     this.exitTypeParamScope();
@@ -1512,7 +1557,12 @@ class Parser {
       this.sem?.declareLocalVar(p.name, p.type, p.range, { annotations: p.annotations });
     }
 
-    this.parseBlock(true);
+    this.returnTypeStack.push(ret);
+    try {
+      this.parseBlock(true);
+    } finally {
+      this.returnTypeStack.pop();
+    }
 
     this.sem?.exitScope();
     this.exitTypeParamScope();
@@ -1551,7 +1601,10 @@ class Parser {
     });
     this.linkPendingDoc(`${containerName}.${fieldName}`, declRange);
 
-    if (this.match("op", "=")) this.parseExpression();
+    if (this.match("op", "=")) {
+      const init = this.parseExpression();
+      this.checkExplicitRefForPtrExpected(fieldType, init);
+    }
     this.consumeStmtEnd("container field: expected ';' or end-of-line");
   }
 
@@ -1890,7 +1943,10 @@ class Parser {
 
     if (this.at("kw", "return")) {
       this.i++;
-      if (!this.at("punc", ";")) this.parseExpression();
+      if (!this.at("punc", ";")) {
+        const ret = this.parseExpression();
+        this.checkExplicitRefForPtrExpected(this.currentReturnType(), ret);
+      }
       this.expect("punc", ";");
       return;
     }
@@ -1955,8 +2011,9 @@ class Parser {
     }
 
     try {
-      this.parseExpression();
+      const expr = this.parseExpression();
       if (allowTailExpression && this.atBlockEndAfterTrivia()) {
+        this.checkExplicitRefForPtrExpected(this.currentReturnType(), expr);
         this.pendingDoc = undefined;
         this.clearPendingMetadata();
         return;
@@ -2097,7 +2154,10 @@ class Parser {
     else this.sem?.declareLocalVar(vName, vType, declRange, opts);
     this.linkPendingDoc(vName, declRange);
 
-    if (this.match("op", "=")) this.parseExpression();
+    if (this.match("op", "=")) {
+      const init = this.parseExpression();
+      this.checkExplicitRefForPtrExpected(vType, init);
+    }
     this.consumeStmtEnd("var_decl: expected ';' or end-of-line");
   }
 
@@ -2244,7 +2304,12 @@ class Parser {
     for (const p of paramsInfo) this.sem?.declareLocalVar(p.name, p.type, p.range, { annotations: p.annotations });
 
     if (this.at("punc", "{")) {
-      this.parseBlock(true);
+      this.returnTypeStack.push(undefined);
+      try {
+        this.parseBlock(true);
+      } finally {
+        this.returnTypeStack.pop();
+      }
     } else {
       const body = this.parseExpression();
       ret = body.type;
@@ -2267,8 +2332,10 @@ class Parser {
   private parseAssign(): ExprInfo {
     let left = this.parseLogicalOr();
     if (this.at("op") && ["=","+=","-=","*=","/=","%=","|=","^=","&=","||=","&&="].includes(this.cur().text)) {
+      const op = this.cur().text;
       this.i++;
       const right = this.parseAssign();
+      if (op === "=") this.checkExplicitRefForPtrExpected(left.type, right);
       left = { type: right.type, start: left.start, end: right.end };
     }
     return left;
@@ -2333,7 +2400,13 @@ class Parser {
       let t: TypeNode = { kind: "unknown" };
       if (opTok.text === "ref") t = { kind: "ptr", to: inner.type };
       else if (opTok.text === "dref" && inner.type.kind === "ptr") t = inner.type.to;
-      return { type: t, start: opTok.start, end: inner.end ?? opTok.end };
+      return {
+        type: t,
+        explicitRef: opTok.text === "ref",
+        requiresExplicitRefForPtr: opTok.text === "dref" ? valueRequiresExplicitRefForPtr(t) : false,
+        start: opTok.start,
+        end: inner.end ?? opTok.end
+      };
     }
     if (this.at("op") && (this.cur().text === "+" || this.cur().text === "-")) {
       const opTok = this.cur();
@@ -2356,10 +2429,12 @@ class Parser {
 
       if (this.match("punc","(")) {
         wasCall = true;
-        let argc = 0;
+        const args: CallArg[] = [];
         if (!this.at("punc",")")) {
-          this.parseExpression(); argc++;
-          while (this.match("punc",",")) { this.parseExpression(); argc++; }
+          args.push(this.toCallArg(this.parseExpression()));
+          while (this.match("punc",",")) {
+            args.push(this.toCallArg(this.parseExpression()));
+          }
         }
         const endTok = this.cur();
         this.expect("punc",")");
@@ -2367,14 +2442,14 @@ class Parser {
 
         if (expr.isSyscall) {
         } else if (expr.associatedContainerName && expr.associatedMethodName) {
-          this.sem?.callAssociatedMethod(expr.associatedContainerName, expr.associatedMethodName, argc, callRange);
+          this.sem?.callAssociatedMethod(expr.associatedContainerName, expr.associatedMethodName, args, callRange);
         } else if (expr.instanceContainerName && expr.instanceMethodName) {
-          this.sem?.callInstanceMethod(expr.instanceContainerName, expr.instanceMethodName, argc, callRange);
+          this.sem?.callInstanceMethod(expr.instanceContainerName, expr.instanceMethodName, args, callRange);
         } else if (expr.identName && !expr.isTypeName) {
           this.sem?.noteCallSite(expr.identName, callRange);
-          this.sem?.callNamedOrValue(expr.identName, argc, callRange);
+          this.sem?.callNamedOrValue(expr.identName, args, callRange);
         } else {
-          this.sem?.callIndirectExpr(expr.type, argc, callRange);
+          this.sem?.callIndirectExpr(expr.type, args, callRange);
         }
 
         expr = { type: { kind: "unknown" }, start: expr.start, end: endTok.end };
@@ -2425,6 +2500,7 @@ class Parser {
           type: member.type,
           start: expr.start,
           end: memberTok.end,
+          requiresExplicitRefForPtr: !member.methodName && valueRequiresExplicitRefForPtr(member.type),
           instanceContainerName: member.containerName,
           instanceMethodName: member.methodName
         };
@@ -2444,7 +2520,12 @@ class Parser {
         if (expr.type.kind === "arr") indexedType = expr.type.elem;
         else if (expr.type.kind === "ptr") indexedType = expr.type.to;
 
-        expr = { type: indexedType, start: expr.start, end: this.prev().end };
+        expr = {
+          type: indexedType,
+          start: expr.start,
+          end: this.prev().end,
+          requiresExplicitRefForPtr: valueRequiresExplicitRefForPtr(indexedType)
+        };
         continue;
       }
 
@@ -2519,7 +2600,13 @@ class Parser {
 
       const vt = this.sem?.getVarType(name);
       if (vt) {
-        return { type: vt, identName: name, start: tok.start, end: tok.end };
+        return {
+          type: vt,
+          identName: name,
+          requiresExplicitRefForPtr: valueRequiresExplicitRefForPtr(vt),
+          start: tok.start,
+          end: tok.end
+        };
       }
 
       if (this.sem?.hasContainer(name)) {
@@ -2552,6 +2639,8 @@ class Parser {
       const value = unquote(tok.text);
       return {
         type: { kind: "arr", len: value.length + 1, elem: { kind: "prim", name: "u8" } },
+        requiresExplicitRefForPtr: true,
+        isStringLiteral: true,
         start: tok.start,
         end: tok.end
       };
@@ -2567,7 +2656,14 @@ class Parser {
       const inner = this.parseExpression();
       this.expect("punc",")","expected ')'");
       const rpar = this.prev();
-      return { type: inner.type, start: lpar.start, end: rpar.end };
+      return {
+        type: inner.type,
+        explicitRef: inner.explicitRef,
+        requiresExplicitRefForPtr: inner.requiresExplicitRefForPtr,
+        isStringLiteral: inner.isStringLiteral,
+        start: lpar.start,
+        end: rpar.end
+      };
     }
 
     const c = this.cur();
