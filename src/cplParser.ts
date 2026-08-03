@@ -183,7 +183,7 @@ type ExprInfo = {
   end?: number;
 };
 
-type ParseIssue = { message: string; range: Range };
+type ParseIssue = { message: string; range: Range; severity?: "error" | "warning" };
 
 const KEYWORDS = new Set([
   // top-level / statements

@@ -64,7 +64,7 @@ export function formatType(t: TypeNode): string {
   }
 }
 
-export type Issue = { message: string; range: Range };
+export type Issue = { message: string; range: Range; severity?: "error" | "warning" };
 
 export type VarSym = {
   kind: "var";
@@ -72,6 +72,8 @@ export type VarSym = {
   type: TypeNode;
   range: Range;
   filePath?: string;
+  containerName?: string;
+  isGlobal?: boolean;
   readonly?: boolean;
   annotations?: string[];
 };
@@ -196,6 +198,13 @@ function mergeParamAnnotations(existing: ParamSig[], incoming: ParamSig[]) {
   for (let i = 0; i < Math.min(existing.length, incoming.length); i++) {
     existing[i].annotations = mergeAnnotations(existing[i].annotations, incoming[i].annotations);
   }
+}
+
+function hasSignatureAnnotations(
+  annotations: readonly string[] | undefined,
+  params: readonly ParamSig[]
+): boolean {
+  return !!annotations?.length || params.some((p) => !!p.annotations?.length);
 }
 
 export type SizeofOptions = {
@@ -712,6 +721,7 @@ export class SemanticContext {
       type,
       range,
       filePath: this.currentFilePath,
+      containerName,
       readonly: opts?.readonly,
       annotations: opts?.annotations?.length ? [...opts.annotations] : undefined
     };
@@ -815,8 +825,22 @@ export class SemanticContext {
     if (doc && !exact.doc) exact.doc = doc;
     if (opts?.self) exact.isSelfMethod = true;
     if (opts?.global) exact.isGlobal = true;
-    exact.annotations = mergeAnnotations(exact.annotations, opts?.annotations);
-    mergeParamAnnotations(exact.params, params);
+
+    const implementationAnnotationsIgnored =
+      isDefinition &&
+      exact.decls.length > 0 &&
+      hasSignatureAnnotations(opts?.annotations, params);
+
+    if (implementationAnnotationsIgnored) {
+      this.issues.push({
+        message: `Method '${containerName}.${name}' already has a prototype; annotations on the implementation are ignored. Put them on the prototype instead.`,
+        range,
+        severity: "warning"
+      });
+    } else {
+      exact.annotations = mergeAnnotations(exact.annotations, opts?.annotations);
+      mergeParamAnnotations(exact.params, params);
+    }
 
     if (isDefinition) {
       if (exact.def) {
@@ -1050,6 +1074,7 @@ export class SemanticContext {
       type,
       range,
       filePath: this.currentFilePath,
+      isGlobal: true,
       readonly: opts?.readonly,
       annotations: opts?.annotations?.length ? [...opts.annotations] : undefined
     };
@@ -1072,6 +1097,7 @@ export class SemanticContext {
       type,
       range,
       filePath: this.currentFilePath,
+      isGlobal: true,
       readonly: opts?.readonly,
       annotations: opts?.annotations?.length ? [...opts.annotations] : undefined
     };
@@ -1167,8 +1193,22 @@ export class SemanticContext {
 
     if (doc && !exact.doc) exact.doc = doc;
     if (opts?.global) exact.isGlobal = true;
-    exact.annotations = mergeAnnotations(exact.annotations, opts?.annotations);
-    mergeParamAnnotations(exact.params, params);
+
+    const implementationAnnotationsIgnored =
+      isDefinition &&
+      exact.decls.length > 0 &&
+      hasSignatureAnnotations(opts?.annotations, params);
+
+    if (implementationAnnotationsIgnored) {
+      this.issues.push({
+        message: `Function '${name}' already has a prototype; annotations on the implementation are ignored. Put them on the prototype instead.`,
+        range,
+        severity: "warning"
+      });
+    } else {
+      exact.annotations = mergeAnnotations(exact.annotations, opts?.annotations);
+      mergeParamAnnotations(exact.params, params);
+    }
 
     if (isDefinition) {
       if (exact.def) {

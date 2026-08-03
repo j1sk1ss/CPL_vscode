@@ -12,7 +12,10 @@ import {
   Location,
   SemanticTokensBuilder,
   CompletionItem,
-  CompletionItemKind
+  CompletionItemKind,
+  DocumentLink,
+  Range,
+  TextEdit
 } from "vscode-languageserver/node";
 
 import * as fs from "fs";
@@ -68,7 +71,10 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
       hoverProvider: true,
       definitionProvider: true,
       completionProvider: {
-        triggerCharacters: [".", ":"]
+        triggerCharacters: [".", ":", "\"", "<", "/"]
+      },
+      documentLinkProvider: {
+        resolveProvider: false
       },
       semanticTokensProvider: {
         legend: {
@@ -160,6 +166,19 @@ function makeIncludeDirs(fromFilePath?: string): string[] {
   return uniquePaths(dirs).filter((d) => fs.existsSync(d));
 }
 
+function includeBaseDir(fromFilePath?: string): string {
+  if (fromFilePath) return path.dirname(fromFilePath);
+  return workspaceRoots[0] ?? process.cwd();
+}
+
+function makeIncludeSearchDirs(fromFilePath: string | undefined, isSystemInclude: boolean): string[] {
+  const baseDir = includeBaseDir(fromFilePath);
+  const includeDirs = makeIncludeDirs(fromFilePath);
+  return isSystemInclude
+    ? uniquePaths([...includeDirs, baseDir])
+    : uniquePaths([baseDir, ...includeDirs]);
+}
+
 function inferSysTypeForFile(fromFilePath?: string): CplSysType {
   const makefilePath = findMakefileUpwards(fromFilePath);
   if (makefilePath) {
@@ -199,19 +218,10 @@ function makeIncludeResolver(
 ): IncludeResolver {
   return (includePath, fromFilePath, isSystemInclude) => {
     const inc = includePath.replace(/\\/g, "/");
-
-    const baseDir =
-      fromFilePath ? path.dirname(fromFilePath)
-      : rootDocFsPath ? path.dirname(rootDocFsPath)
-      : workspaceRoots[0] ?? process.cwd();
-
-    const localCandidate = path.isAbsolute(inc) ? inc : path.resolve(baseDir, inc);
-    const includeCandidates = makeIncludeDirs(fromFilePath ?? rootDocFsPath)
-      .map((dir) => path.resolve(dir, inc));
-
-    const candidates = isSystemInclude
-      ? uniquePaths([...includeCandidates, localCandidate])
-      : uniquePaths([localCandidate, ...includeCandidates]);
+    const sourcePath = fromFilePath ?? rootDocFsPath;
+    const candidates = path.isAbsolute(inc)
+      ? [inc]
+      : makeIncludeSearchDirs(sourcePath, !!isSystemInclude).map((dir) => path.resolve(dir, inc));
 
     for (const candidate of candidates) {
       const res = readCplFile(candidate);
@@ -220,6 +230,217 @@ function makeIncludeResolver(
 
     return undefined;
   };
+}
+
+function resolveIncludeFilePath(
+  includePath: string,
+  fromFilePath: string | undefined,
+  isSystemInclude: boolean
+): string | undefined {
+  return makeIncludeResolver(documents, fromFilePath)(includePath, fromFilePath, isSystemInclude)?.filePath;
+}
+
+type IncludeReference = {
+  includePath: string;
+  isSystemInclude: boolean;
+  fullRange: Range;
+  pathRange: Range;
+  fullStartOffset: number;
+  fullEndOffset: number;
+  pathStartOffset: number;
+  pathEndOffset: number;
+};
+
+type IncludeCompletionContext = {
+  includePath: string;
+  isSystemInclude: boolean;
+  replaceRange: Range;
+  wrapWithAngles: boolean;
+};
+
+function rangeFromOffsets(doc: TextDocument, start: number, end: number): Range {
+  return Range.create(doc.positionAt(start), doc.positionAt(end));
+}
+
+function lineBounds(doc: TextDocument, line: number): { start: number; end: number; text: string } {
+  const fullText = doc.getText();
+  const start = doc.offsetAt(Position.create(line, 0));
+  const nextLineStart = line + 1 < doc.lineCount
+    ? doc.offsetAt(Position.create(line + 1, 0))
+    : fullText.length;
+
+  let end = nextLineStart;
+  if (end > start && fullText.charCodeAt(end - 1) === 10) end--;
+  if (end > start && fullText.charCodeAt(end - 1) === 13) end--;
+
+  return { start, end, text: fullText.slice(start, end) };
+}
+
+function trimIncludePath(
+  lineText: string,
+  lineStartOffset: number,
+  pathStartRel: number,
+  pathEndRel: number
+): { text: string; startOffset: number; endOffset: number } {
+  let startRel = pathStartRel;
+  let endRel = pathEndRel;
+
+  while (startRel < endRel && /\s/.test(lineText[startRel])) startRel++;
+  while (endRel > startRel && /\s/.test(lineText[endRel - 1])) endRel--;
+
+  return {
+    text: lineText.slice(startRel, endRel),
+    startOffset: lineStartOffset + startRel,
+    endOffset: lineStartOffset + endRel
+  };
+}
+
+function includeReferenceOnLine(doc: TextDocument, line: number): IncludeReference | undefined {
+  const { start: lineStart, text: lineText } = lineBounds(doc, line);
+  const directive = /^(\s*#\s*include\b[ \t]*)/.exec(lineText);
+  if (!directive) return undefined;
+
+  const openRel = directive[1].length;
+  const open = lineText[openRel];
+  if (open !== "\"" && open !== "<") return undefined;
+
+  const close = open === "<" ? ">" : "\"";
+  const pathStartRel = openRel + 1;
+  const closeRel = lineText.indexOf(close, pathStartRel);
+  const pathEndRel = closeRel >= 0 ? closeRel : lineText.length;
+  const fullEndRel = closeRel >= 0 ? closeRel + 1 : lineText.length;
+  const trimmed = trimIncludePath(lineText, lineStart, pathStartRel, pathEndRel);
+
+  return {
+    includePath: trimmed.text,
+    isSystemInclude: open === "<",
+    fullRange: rangeFromOffsets(doc, lineStart + openRel, lineStart + fullEndRel),
+    pathRange: rangeFromOffsets(doc, trimmed.startOffset, trimmed.endOffset),
+    fullStartOffset: lineStart + openRel,
+    fullEndOffset: lineStart + fullEndRel,
+    pathStartOffset: trimmed.startOffset,
+    pathEndOffset: trimmed.endOffset
+  };
+}
+
+function includeReferenceAtPosition(doc: TextDocument, pos: Position): IncludeReference | undefined {
+  const ref = includeReferenceOnLine(doc, pos.line);
+  if (!ref) return undefined;
+
+  const offset = doc.offsetAt(pos);
+  return offset >= ref.fullStartOffset && offset <= ref.fullEndOffset ? ref : undefined;
+}
+
+function includeCompletionContextAtPosition(doc: TextDocument, pos: Position): IncludeCompletionContext | undefined {
+  const { start: lineStart, text: lineText } = lineBounds(doc, pos.line);
+  const directive = /^(\s*#\s*include\b[ \t]*)/.exec(lineText);
+  if (!directive) return undefined;
+
+  const posOffset = doc.offsetAt(pos);
+  const posRel = posOffset - lineStart;
+  const openRel = directive[1].length;
+  if (posRel < openRel) return undefined;
+
+  const open = lineText[openRel];
+  if (open === "\"" || open === "<") {
+    const close = open === "<" ? ">" : "\"";
+    const pathStartRel = openRel + 1;
+    const closeRel = lineText.indexOf(close, pathStartRel);
+    const pathEndRel = closeRel >= 0 ? closeRel : lineText.length;
+
+    if (posRel < pathStartRel || posRel > pathEndRel) return undefined;
+
+    return {
+      includePath: lineText.slice(pathStartRel, pathEndRel),
+      isSystemInclude: open === "<",
+      replaceRange: rangeFromOffsets(doc, lineStart + pathStartRel, lineStart + pathEndRel),
+      wrapWithAngles: false
+    };
+  }
+
+  const pathEndRel = lineText.length;
+  return {
+    includePath: lineText.slice(openRel, pathEndRel).trim(),
+    isSystemInclude: true,
+    replaceRange: rangeFromOffsets(doc, lineStart + openRel, lineStart + pathEndRel),
+    wrapWithAngles: true
+  };
+}
+
+function collectCplIncludeEntries(root: string): { relativePath: string; isDirectory: boolean }[] {
+  const out: { relativePath: string; isDirectory: boolean }[] = [];
+  const maxEntries = 700;
+  const maxDepth = 6;
+  const skipDirs = new Set([".git", "node_modules", "out", "output"]);
+
+  const visit = (dir: string, relDir: string, depth: number) => {
+    if (out.length >= maxEntries || depth > maxDepth) return;
+
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+
+    for (const entry of entries) {
+      if (out.length >= maxEntries) return;
+      if (entry.name.startsWith(".") || skipDirs.has(entry.name)) continue;
+
+      const relPath = relDir ? `${relDir}/${entry.name}` : entry.name;
+      const fullPath = path.join(dir, entry.name);
+
+      if (entry.isDirectory()) {
+        out.push({ relativePath: `${relPath}/`, isDirectory: true });
+        visit(fullPath, relPath, depth + 1);
+      } else if (entry.isFile() && entry.name.endsWith(".cpl")) {
+        out.push({ relativePath: relPath, isDirectory: false });
+      }
+    }
+  };
+
+  visit(root, "", 0);
+  return out;
+}
+
+function includeCompletionItems(doc: TextDocument, pos: Position): CompletionItem[] | undefined {
+  const ctx = includeCompletionContextAtPosition(doc, pos);
+  if (!ctx) return undefined;
+
+  const docFsPath = uriToFsPath(doc.uri);
+  const typedPath = ctx.includePath.replace(/\\/g, "/").trim();
+  const searchDirs = makeIncludeSearchDirs(docFsPath, ctx.isSystemInclude).filter((dir) => fs.existsSync(dir));
+  const seen = new Set<string>();
+  const items: CompletionItem[] = [];
+
+  searchDirs.forEach((dir, dirIndex) => {
+    for (const entry of collectCplIncludeEntries(dir)) {
+      if (seen.has(entry.relativePath)) continue;
+      if (typedPath && !entry.relativePath.startsWith(typedPath) && !path.basename(entry.relativePath).startsWith(typedPath)) {
+        continue;
+      }
+
+      seen.add(entry.relativePath);
+      const insertPath = entry.relativePath;
+      const newText = ctx.wrapWithAngles ? `<${insertPath}>` : insertPath;
+
+      items.push({
+        label: entry.relativePath,
+        kind: entry.isDirectory ? CompletionItemKind.Folder : CompletionItemKind.File,
+        detail: entry.isDirectory ? "CPL include directory" : "CPL include file",
+        sortText: `${dirIndex.toString().padStart(3, "0")}_${entry.isDirectory ? "0" : "1"}_${entry.relativePath}`,
+        textEdit: TextEdit.replace(ctx.replaceRange, newText)
+      });
+    }
+  });
+
+  return items;
+}
+
+function diagnosticSeverityFor(issueSeverity: "error" | "warning" | undefined): DiagnosticSeverity {
+  return issueSeverity === "warning" ? DiagnosticSeverity.Warning : DiagnosticSeverity.Error;
 }
 
 async function validateTextDocument(doc: TextDocument) {
@@ -235,7 +456,7 @@ async function validateTextDocument(doc: TextDocument) {
   semByUri.set(doc.uri, sem);
 
   const diags: Diagnostic[] = issues.map((e) => ({
-    severity: DiagnosticSeverity.Error,
+    severity: diagnosticSeverityFor(e.severity),
     range: e.range,
     message: e.message,
     source: "cpl-ls"
@@ -526,6 +747,163 @@ function signaturesMarkdown(fns: FuncOverloadSym[]): string {
   return lines.join("\n");
 }
 
+const builtinTypeNames = [
+  "i0", "i8", "i16", "i32", "i64",
+  "u8", "u16", "u32", "u64",
+  "f32", "f64", "str", "ptr", "arr"
+];
+
+const cplKeywords = [
+  "function", "container", "glob", "extern", "ro",
+  "return", "if", "else", "loop", "while", "switch", "case", "default", "break", "exit",
+  "sizeof", "poparg", "ref", "dref", "not", "neg", "as",
+  "section", "align", "lis", "asm", "from", "import"
+];
+
+const cplAnnotations = [
+  "abi", "align", "address", "cold", "counter", "entry", "hot", "inline",
+  "like_c", "naked", "no_fall", "nosection", "only_body", "poparg",
+  "register", "section", "self", "straight", "union", "vname"
+];
+
+function uniqueCompletionItems(items: CompletionItem[]): CompletionItem[] {
+  const seen = new Set<string>();
+  const out: CompletionItem[] = [];
+
+  for (const item of items) {
+    const key = `${item.kind ?? 0}:${item.label}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+
+  return out;
+}
+
+function containerCompletionItems(sem: SemanticContext): CompletionItem[] {
+  return [...sem.containers.values()]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((container) => ({
+      label: container.name,
+      kind: CompletionItemKind.Struct,
+      detail: `container ${container.name}`,
+      documentation: {
+        kind: MarkupKind.Markdown,
+        value: renderContainerHover(sem, container)
+      },
+      insertText: container.name,
+      sortText: `0_container_${container.name}`
+    }));
+}
+
+function functionCompletionItems(sem: SemanticContext): CompletionItem[] {
+  const items: CompletionItem[] = [];
+
+  for (const [name, overloads] of sem.funcs) {
+    if (name.includes("::")) continue;
+    const visible = overloads.filter((fn) => !fn.containerName);
+    if (!visible.length) continue;
+
+    items.push({
+      label: name,
+      kind: CompletionItemKind.Function,
+      detail: visible.map(annotatedFunctionInline).join(" | "),
+      documentation: {
+        kind: MarkupKind.Markdown,
+        value: renderOverloads(visible, { title: `Function ${name}` })
+      },
+      insertText: name,
+      sortText: `1_function_${name}`
+    });
+  }
+
+  return items.sort((a, b) => a.label.localeCompare(b.label));
+}
+
+function globalVariableCompletionItems(sem: SemanticContext): CompletionItem[] {
+  return [...sem.globals.values()]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((global) => {
+      const declaration = annotatedVariableLines(global.name, global.type, global.annotations, !!global.readonly);
+      return {
+        label: global.name,
+        kind: CompletionItemKind.Variable,
+        detail: declaration.join(" "),
+        documentation: {
+          kind: MarkupKind.Markdown,
+          value: ["```cpl", ...declaration, "```"].join("\n")
+        },
+        insertText: global.name,
+        sortText: `2_global_${global.name}`
+      };
+    });
+}
+
+function macroValueString(value: { kind: string; value?: unknown; text?: string }): string {
+  if (value.kind === "string") return JSON.stringify(value.value);
+  if (value.kind === "char") return quoteCplChar(String(value.value ?? ""));
+  if (value.kind === "number") return String(value.value);
+  return value.text ?? "";
+}
+
+function macroCompletionItems(sem: SemanticContext): CompletionItem[] {
+  return [...sem.macros.values()]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((macro) => ({
+      label: macro.name,
+      kind: CompletionItemKind.Constant,
+      detail: `#define ${macro.name} ${macroValueString(macro.value)}`.trimEnd(),
+      documentation: macro.doc?.trim()
+        ? { kind: MarkupKind.Markdown, value: macro.doc }
+        : undefined,
+      insertText: macro.name,
+      sortText: `3_macro_${macro.name}`
+    }));
+}
+
+function builtinTypeCompletionItems(): CompletionItem[] {
+  return builtinTypeNames.map((name) => ({
+    label: name,
+    kind: CompletionItemKind.Keyword,
+    detail: "CPL type",
+    insertText: name,
+    sortText: `4_type_${name}`
+  }));
+}
+
+function keywordCompletionItems(): CompletionItem[] {
+  return cplKeywords.map((name) => ({
+    label: name,
+    kind: CompletionItemKind.Keyword,
+    detail: "CPL keyword",
+    insertText: name,
+    sortText: `5_keyword_${name}`
+  }));
+}
+
+function annotationCompletionItems(prefix: string): CompletionItem[] | undefined {
+  if (!/@\[[A-Za-z_]\w*$/.test(prefix)) return undefined;
+
+  return cplAnnotations.map((name) => ({
+    label: name,
+    kind: CompletionItemKind.Property,
+    detail: "CPL annotation",
+    insertText: name,
+    sortText: `0_annotation_${name}`
+  }));
+}
+
+function generalCompletionItems(sem: SemanticContext): CompletionItem[] {
+  return uniqueCompletionItems([
+    ...containerCompletionItems(sem),
+    ...functionCompletionItems(sem),
+    ...globalVariableCompletionItems(sem),
+    ...macroCompletionItems(sem),
+    ...builtinTypeCompletionItems(),
+    ...keywordCompletionItems()
+  ]);
+}
+
 function methodCompletionItems(container: ContainerSym, access: "::" | "."): CompletionItem[] {
   const items: CompletionItem[] = [];
 
@@ -612,12 +990,18 @@ connection.onCompletion((params): CompletionItem[] => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return [];
 
+  const includeItems = includeCompletionItems(doc, params.position);
+  if (includeItems) return includeItems;
+
   const sem = semanticContextForDocument(doc);
   const docFsPath = uriToFsPath(params.textDocument.uri);
   const prefix = doc.getText({
     start: Position.create(params.position.line, 0),
     end: params.position
   });
+
+  const annotationItems = annotationCompletionItems(prefix);
+  if (annotationItems) return annotationItems;
 
   const scopeMatch = prefix.match(/\b([A-Za-z_]\w*)::([A-Za-z_]\w*)?$/);
   if (scopeMatch) {
@@ -631,7 +1015,7 @@ connection.onCompletion((params): CompletionItem[] => {
     return container ? [...fieldCompletionItems(container), ...methodCompletionItems(container, ".")] : [];
   }
 
-  return [];
+  return generalCompletionItems(sem);
 });
 
 function findFuncDeclHover(sem: SemanticContext, pos: Position, currentFilePath?: string): FuncOverloadSym | undefined {
@@ -799,12 +1183,45 @@ function locationsForFunctions(
   );
 }
 
-connection.onDefinition((params) => {
-  const sem = semByUri.get(params.textDocument.uri);
-  if (!sem) return null;
+connection.onDocumentLinks((params): DocumentLink[] => {
+  const doc = documents.get(params.textDocument.uri);
+  if (!doc) return [];
 
   const docFsPath = uriToFsPath(params.textDocument.uri);
+  const links: DocumentLink[] = [];
+
+  for (let line = 0; line < doc.lineCount; line++) {
+    const ref = includeReferenceOnLine(doc, line);
+    if (!ref?.includePath) continue;
+
+    const target = resolveIncludeFilePath(ref.includePath, docFsPath, ref.isSystemInclude);
+    if (!target) continue;
+
+    links.push({
+      range: ref.pathRange,
+      target: pathToFileURL(path.normalize(target)).toString(),
+      tooltip: `Open ${ref.includePath}`
+    });
+  }
+
+  return links;
+});
+
+connection.onDefinition((params) => {
+  const doc = documents.get(params.textDocument.uri);
+  const docFsPath = uriToFsPath(params.textDocument.uri);
   const pos = params.position;
+
+  if (doc) {
+    const includeRef = includeReferenceAtPosition(doc, pos);
+    if (includeRef?.includePath) {
+      const target = resolveIncludeFilePath(includeRef.includePath, docFsPath, includeRef.isSystemInclude);
+      if (target) return locationFor(target, Range.create(Position.create(0, 0), Position.create(0, 0)), params.textDocument.uri);
+    }
+  }
+
+  const sem = semByUri.get(params.textDocument.uri);
+  if (!sem) return null;
 
   const docLink = sem.docLinks.find((d) => belongsToFile(d.filePath, docFsPath) && inRange(pos, d.range));
   if (docLink) {
