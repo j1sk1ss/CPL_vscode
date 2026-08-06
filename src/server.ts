@@ -844,12 +844,6 @@ const cplKeywords = [
   "section", "align", "lis", "asm", "from", "import"
 ];
 
-const cplAnnotations = [
-  "abi", "align", "address", "cold", "counter", "entry", "hot", "inline",
-  "like_c", "naked", "no_fall", "nosection", "only_body", "poparg",
-  "register", "section", "self", "straight", "union", "vname"
-];
-
 function uniqueCompletionItems(items: CompletionItem[]): CompletionItem[] {
   const seen = new Set<string>();
   const out: CompletionItem[] = [];
@@ -962,18 +956,6 @@ function keywordCompletionItems(): CompletionItem[] {
     detail: "CPL keyword",
     insertText: name,
     sortText: `5_keyword_${name}`
-  }));
-}
-
-function annotationCompletionItems(prefix: string): CompletionItem[] | undefined {
-  if (!/@\[[A-Za-z_]\w*$/.test(prefix)) return undefined;
-
-  return cplAnnotations.map((name) => ({
-    label: name,
-    kind: CompletionItemKind.Property,
-    detail: "CPL annotation",
-    insertText: name,
-    sortText: `0_annotation_${name}`
   }));
 }
 
