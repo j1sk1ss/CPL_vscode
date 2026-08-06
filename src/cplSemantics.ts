@@ -64,7 +64,15 @@ export function formatType(t: TypeNode): string {
   }
 }
 
-export type Issue = { message: string; range: Range; severity?: "error" | "warning" };
+export type IssueSeverity = "error" | "warning";
+
+export type Issue = {
+  message: string;
+  range: Range;
+  severity?: IssueSeverity;
+  code?: string;
+  data?: { castType?: string };
+};
 
 export type VarSym = {
   kind: "var";
@@ -77,6 +85,9 @@ export type VarSym = {
   readonly?: boolean;
   annotations?: string[];
 };
+
+export const UNINITIALIZED_GLOBAL_STORAGE_CODE = "cpl.uninitializedGlobalStorage";
+export const IMPLICIT_INTEGER_CAST_CODE = "cpl.implicitIntegerCast";
 
 export type FuncOverloadSym = {
   kind: "func";
@@ -392,6 +403,37 @@ function sameType(a: TypeNode, b: TypeNode): boolean {
   }
 }
 
+const INTEGER_TYPE_BITS = new Map<string, number>([
+  ["i8", 8],
+  ["u8", 8],
+  ["i16", 16],
+  ["u16", 16],
+  ["i32", 32],
+  ["u32", 32],
+  ["i64", 64],
+  ["u64", 64]
+]);
+
+function isIntegerType(t: TypeNode): t is { kind: "prim"; name: string } {
+  return t.kind === "prim" && INTEGER_TYPE_BITS.has(t.name);
+}
+
+export function needsExplicitIntegerCast(expected: TypeNode | undefined, actual: TypeNode | undefined): expected is { kind: "prim"; name: string } {
+  return !!expected && !!actual && isIntegerType(expected) && isIntegerType(actual) && expected.name !== actual.name;
+}
+
+export function implicitIntegerCastIssue(expected: TypeNode, actual: TypeNode, range: Range): Issue | undefined {
+  if (!needsExplicitIntegerCast(expected, actual)) return undefined;
+
+  return {
+    message: `Implicit integer cast from '${formatType(actual)}' to '${formatType(expected)}'; use explicit 'as ${formatType(expected)}'`,
+    range,
+    severity: "warning",
+    code: IMPLICIT_INTEGER_CAST_CODE,
+    data: { castType: formatType(expected) }
+  };
+}
+
 function isCallableType(t: TypeNode): boolean {
   return t.kind === "func"
     || (t.kind === "ptr" && t.to.kind === "prim" && t.to.name === "i0");
@@ -445,14 +487,6 @@ function isTypeNamedContainer(t: TypeNode, containerName: string): boolean {
 
 function isSelfRefParam(param: ParamSig | undefined, containerName: string): boolean {
   return !!param && param.type.kind === "ptr" && isTypeNamedContainer(param.type.to, containerName);
-}
-
-function hasExplicitAnnotationArgument(
-  annotations: readonly string[] | undefined,
-  name: string
-): boolean {
-  const arg = annotationArgument(annotations, name);
-  return arg != null && arg.trim().length > 0;
 }
 
 function arityBounds(params: ParamSig[]): { minArgs: number; maxArgs: number } {
@@ -753,17 +787,6 @@ export class SemanticContext {
       this.issues.push({
         message: `@[self] method '${containerName}.${name}' must start with a reference to '${containerName}' (expected 'ptr ${containerName} self')`,
         range: params[0]?.range ?? range
-      });
-    }
-
-    if (
-      opts?.global &&
-      !hasExplicitAnnotationArgument(opts?.annotations, "vname") &&
-      !hasExplicitAnnotationArgument(exact?.annotations, "vname")
-    ) {
-      this.issues.push({
-        message: `Global container method '${containerName}.${name}' must declare an exported name with @[vname("...")]`,
-        range
       });
     }
 
@@ -1086,11 +1109,21 @@ export class SemanticContext {
     name: string,
     type: TypeNode,
     range: Range,
-    opts?: { readonly?: boolean; annotations?: string[] }
+    opts?: { readonly?: boolean; annotations?: string[]; hasInitializer?: boolean; hasSectionPlacement?: boolean }
   ) {
     if (this.globals.has(name)) {
       this.issues.push({ message: `Global '${name}' already declared`, range });
     }
+
+    if (!opts?.hasInitializer && !opts?.hasSectionPlacement && !hasAnnotation(opts?.annotations, "section")) {
+      this.issues.push({
+        message: `Global '${name}' has no initializer; consider @[section(".bss")] for uninitialized storage`,
+        range,
+        severity: "warning",
+        code: UNINITIALIZED_GLOBAL_STORAGE_CODE
+      });
+    }
+
     const sym: VarSym = {
       kind: "var",
       name,
@@ -1140,6 +1173,13 @@ export class SemanticContext {
     const local = this.scope.funcs.get(name) ?? [];
 
     const exact = local.find((f) => sameParamIdentity(f.params, params));
+    if (hasTypeParams(typeParams)) {
+      this.issues.push({
+        message: `Global generic function '${name}' is not allowed; declare generic functions as container methods`,
+        range
+      });
+    }
+
     if (!exact && hasTypeParams(typeParams) && local.some((f) => hasTypeParams(f.typeParams))) {
       this.issues.push({
         message: `Generic function '${name}' cannot have another generic overload`,
@@ -1351,6 +1391,11 @@ export class SemanticContext {
     });
   }
 
+  private noteImplicitIntegerCast(arg: CallArg, expected: TypeNode) {
+    const issue = implicitIntegerCastIssue(expected, arg.type, arg.range);
+    if (issue) this.issues.push(issue);
+  }
+
   private checkExplicitRefArgs(
     candidates: FuncOverloadSym[],
     args: CallArg[],
@@ -1381,6 +1426,31 @@ export class SemanticContext {
     }
   }
 
+  private checkImplicitIntegerCastArgs(
+    candidates: FuncOverloadSym[],
+    args: CallArg[],
+    paramsForFn: (fn: FuncOverloadSym) => ParamSig[] = (fn) => fn.params
+  ) {
+    if (candidates.length === 0) return;
+
+    for (let i = 0; i < args.length; i++) {
+      const expected = candidates
+        .map((fn) => paramForArgument(paramsForFn(fn), i)?.type)
+        .filter((type): type is TypeNode => !!type);
+
+      if (expected.length !== candidates.length || expected.length === 0) continue;
+      if (!expected.every((type) => sameType(type, expected[0]))) continue;
+
+      this.noteImplicitIntegerCast(args[i], expected[0]);
+    }
+  }
+
+  private checkImplicitIntegerCastParamTypes(params: TypeNode[], args: CallArg[]) {
+    for (let i = 0; i < Math.min(params.length, args.length); i++) {
+      this.noteImplicitIntegerCast(args[i], params[i]);
+    }
+  }
+
   callFunc(name: string, args: CallArg[], range: Range) {
     if (name === "syscall") return;
     const argc = args.length;
@@ -1407,7 +1477,10 @@ export class SemanticContext {
           });
           return;
         }
-        if (vt.kind === "func") this.checkExplicitRefParamTypes(vt.params, args);
+        if (vt.kind === "func") {
+          this.checkExplicitRefParamTypes(vt.params, args);
+          this.checkImplicitIntegerCastParamTypes(vt.params, args);
+        }
         this.indirectCallSites.push({ argc, range, filePath: this.currentFilePath, calleeType: vt });
         return;
       }
@@ -1458,7 +1531,10 @@ export class SemanticContext {
         });
         return;
       }
-      if (calleeType.kind === "func") this.checkExplicitRefParamTypes(calleeType.params, args);
+      if (calleeType.kind === "func") {
+        this.checkExplicitRefParamTypes(calleeType.params, args);
+        this.checkImplicitIntegerCastParamTypes(calleeType.params, args);
+      }
       this.indirectCallSites.push({ argc, range, filePath: this.currentFilePath, calleeType });
       return;
     }
@@ -1513,6 +1589,7 @@ export class SemanticContext {
       }
 
       this.checkExplicitRefArgs(resolution.candidates, c.args);
+      this.checkImplicitIntegerCastArgs(resolution.candidates, c.args);
     }
 
     for (const c of this.pendingInstanceCalls) {
@@ -1558,6 +1635,7 @@ export class SemanticContext {
       }
 
       this.checkExplicitRefArgs(resolution.candidates, c.args, instanceCallParams);
+      this.checkImplicitIntegerCastArgs(resolution.candidates, c.args, instanceCallParams);
     }
 
     for (const c of this.pendingCalls) {
@@ -1585,6 +1663,7 @@ export class SemanticContext {
       }
 
       this.checkExplicitRefArgs(resolution.candidates, c.args);
+      this.checkImplicitIntegerCastArgs(resolution.candidates, c.args);
     }
 
     this.pendingAssociatedCalls = [];

@@ -15,7 +15,10 @@ import {
   CompletionItemKind,
   DocumentLink,
   Range,
-  TextEdit
+  InsertTextFormat,
+  TextEdit,
+  CodeAction,
+  CodeActionKind
 } from "vscode-languageserver/node";
 
 import * as fs from "fs";
@@ -31,7 +34,9 @@ import {
   FuncOverloadSym,
   ContainerSym,
   formatAnnotations,
-  TypeNode
+  TypeNode,
+  UNINITIALIZED_GLOBAL_STORAGE_CODE,
+  IMPLICIT_INTEGER_CAST_CODE
 } from "./cplSemantics";
 import {
   CplSysType,
@@ -70,8 +75,11 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
       textDocumentSync: TextDocumentSyncKind.Incremental,
       hoverProvider: true,
       definitionProvider: true,
+      codeActionProvider: {
+        codeActionKinds: [CodeActionKind.QuickFix]
+      },
       completionProvider: {
-        triggerCharacters: [".", ":", "\"", "<", "/"]
+        triggerCharacters: [".", ":", "\"", "<", "/", "@", "["]
       },
       documentLinkProvider: {
         resolveProvider: false
@@ -459,11 +467,87 @@ async function validateTextDocument(doc: TextDocument) {
     severity: diagnosticSeverityFor(e.severity),
     range: e.range,
     message: e.message,
-    source: "cpl-ls"
+    source: "cpl-ls",
+    code: e.code,
+    data: e.data
   }));
 
   connection.sendDiagnostics({ uri: doc.uri, diagnostics: diags });
 }
+
+function preferredNewline(text: string): string {
+  return text.includes("\r\n") ? "\r\n" : "\n";
+}
+
+function lineText(text: string, line: number): string {
+  return text.split(/\r\n|\n|\r/)[line] ?? "";
+}
+
+function bssAnnotationInsertLine(text: string, declarationLine: number): number {
+  const lines = text.split(/\r\n|\n|\r/);
+  let line = declarationLine;
+
+  while (line > 0 && lines[line - 1]?.trim().startsWith("@[")) {
+    line--;
+  }
+
+  return line;
+}
+
+connection.onCodeAction((params): CodeAction[] => {
+  const doc = documents.get(params.textDocument.uri);
+  if (!doc) return [];
+
+  const text = doc.getText();
+  const newline = preferredNewline(text);
+  const actions: CodeAction[] = [];
+
+  for (const diagnostic of params.context.diagnostics) {
+    if (diagnostic.source !== "cpl-ls") continue;
+
+    if (diagnostic.code === UNINITIALIZED_GLOBAL_STORAGE_CODE) {
+      const line = bssAnnotationInsertLine(text, diagnostic.range.start.line);
+      const indent = lineText(text, line).match(/^[ \t]*/)?.[0] ?? "";
+
+      actions.push({
+        title: "Place uninitialized global storage in .bss",
+        kind: CodeActionKind.QuickFix,
+        diagnostics: [diagnostic],
+        edit: {
+          changes: {
+            [params.textDocument.uri]: [
+              TextEdit.insert(Position.create(line, 0), `${indent}@[section(".bss")]${newline}`)
+            ]
+          }
+        }
+      });
+      continue;
+    }
+
+    if (diagnostic.code === IMPLICIT_INTEGER_CAST_CODE) {
+      const castType =
+        typeof diagnostic.data === "object" && diagnostic.data && "castType" in diagnostic.data
+          ? String(diagnostic.data.castType)
+          : diagnostic.message.match(/as ([iu](?:8|16|32|64))'/)?.[1];
+      if (!castType) continue;
+
+      actions.push({
+        title: `Cast explicitly to ${castType}`,
+        kind: CodeActionKind.QuickFix,
+        diagnostics: [diagnostic],
+        edit: {
+          changes: {
+            [params.textDocument.uri]: [
+              TextEdit.insert(diagnostic.range.end, ` as ${castType}`)
+            ]
+          }
+        }
+      });
+    }
+  }
+
+  return actions;
+});
 
 function semanticContextForDocument(doc: TextDocument): SemanticContext {
   const existing = semByUri.get(doc.uri);
@@ -964,6 +1048,173 @@ function fieldCompletionItems(container: ContainerSym): CompletionItem[] {
   });
 }
 
+type AnnotationCompletion = {
+  label: string;
+  insertText: string;
+  detail: string;
+  documentation: string;
+};
+
+const annotationCompletions: AnnotationCompletion[] = [
+  {
+    label: "entry",
+    insertText: "entry",
+    detail: "@[entry], @[entry(\"name\")]",
+    documentation: "Marks a function or `start` as the program entry. With a name argument, uses that backend-visible entry symbol."
+  },
+  {
+    label: "naked",
+    insertText: "naked",
+    detail: "@[naked]",
+    documentation: "Suppresses normal entry/exit routines for a function or `start`. Use only for code that fully controls its own prologue and epilogue."
+  },
+  {
+    label: "section",
+    insertText: "section(\"${1:name}\")",
+    detail: "@[section(\"name\")], @[section(\"name\", N)]",
+    documentation: "Places a global or read-only variable, global array, function, or `start` into a named section. Optional `N` sets section alignment."
+  },
+  {
+    label: "nosection",
+    insertText: "nosection",
+    detail: "@[nosection]",
+    documentation: "Places a global function into the configured no-section bucket."
+  },
+  {
+    label: "align",
+    insertText: "align(${1:N})",
+    detail: "@[align(N)]",
+    documentation: "Requests memory or container alignment for a variable, array, or container."
+  },
+  {
+    label: "register",
+    insertText: "register(${1:N})",
+    detail: "@[register(N)]",
+    documentation: "Binds a variable declaration to a target register index."
+  },
+  {
+    label: "poparg",
+    insertText: "poparg",
+    detail: "@[poparg]",
+    documentation: "Reads the next variadic argument into a variable declaration in a variadic context."
+  },
+  {
+    label: "inline",
+    insertText: "inline",
+    detail: "@[inline], @[inline(always)], @[inline(never)], @[inline(model)]",
+    documentation: "Increases the inliner preference for a function. Options can force always, never, or model-based inline decisions."
+  },
+  {
+    label: "only_body",
+    insertText: "only_body",
+    detail: "@[only_body]",
+    documentation: "Emits only the function body, without the normal label/export wrapper."
+  },
+  {
+    label: "self",
+    insertText: "self",
+    detail: "@[self]",
+    documentation: "Marks a container function as an explicit-self method for container call rewriting. The first parameter should be `ptr <container> self`."
+  },
+  {
+    label: "abi",
+    insertText: "abi",
+    detail: "@[abi]",
+    documentation: "Marks a function as ABI-compatible."
+  },
+  {
+    label: "weak",
+    insertText: "weak",
+    detail: "@[weak]",
+    documentation: "Marks a function as a weak symbol."
+  },
+  {
+    label: "vname",
+    insertText: "vname(\"${1:symbol}\")",
+    detail: "@[vname(\"symbol\")]",
+    documentation: "Uses an explicit backend/linker-visible symbol name without marking the function as the program entry point."
+  },
+  {
+    label: "like_c",
+    insertText: "like_c",
+    detail: "@[like_c]",
+    documentation: "Uses C-like field layout handling for a container instead of the requested CPL alignment value."
+  },
+  {
+    label: "no_fall",
+    insertText: "no_fall",
+    detail: "@[no_fall]",
+    documentation: "Makes switch cases behave as if they end with `break`."
+  },
+  {
+    label: "straight",
+    insertText: "straight",
+    detail: "@[straight]",
+    documentation: "Forces linear switch selection instead of the default binary-search-style generation."
+  },
+  {
+    label: "counter",
+    insertText: "counter(${1:N})",
+    detail: "@[counter(N, STP)]",
+    documentation: "Generates a counted `loop`. The optional `STP` argument supplies the step."
+  },
+  {
+    label: "hot",
+    insertText: "hot",
+    detail: "@[hot]",
+    documentation: "Marks an `if` condition as hot; the false branch is laid out as cold."
+  },
+  {
+    label: "cold",
+    insertText: "cold",
+    detail: "@[cold]",
+    documentation: "Marks an `if` true branch or a switch `case` as cold for layout."
+  },
+  {
+    label: "not_lazy",
+    insertText: "not_lazy",
+    detail: "@[not_lazy]",
+    documentation: "Forces both sides of `&&` or `||` to be evaluated."
+  },
+  {
+    label: "union",
+    insertText: "union",
+    detail: "@[union]",
+    documentation: "Lays out all container fields at offset zero and allocates enough memory for the largest field."
+  }
+];
+
+function annotationCompletionItems(prefix: string, position: Position): CompletionItem[] {
+  const annotationMatch = prefix.match(/@(\[?)([A-Za-z_]*)$/);
+  if (!annotationMatch) return [];
+
+  const hasOpenBracket = annotationMatch[1] === "[";
+  const typed = annotationMatch[2] ?? "";
+  const replaceStart = Position.create(position.line, position.character - typed.length);
+  return annotationCompletions
+    .filter((annotation) => annotation.label.startsWith(typed))
+    .map((annotation) => ({
+      label: annotation.label,
+      kind: CompletionItemKind.Property,
+      detail: annotation.detail,
+      documentation: {
+        kind: MarkupKind.Markdown,
+        value: [
+          "```cpl",
+          annotation.detail,
+          "```",
+          annotation.documentation
+        ].join("\n")
+      },
+      textEdit: TextEdit.replace(
+        { start: replaceStart, end: position },
+        hasOpenBracket ? `${annotation.insertText}]` : `[${annotation.insertText}]`
+      ),
+      insertTextFormat: InsertTextFormat.Snippet,
+      sortText: `0_${annotation.label}`
+    }));
+}
+
 function findVarContainerAtPosition(
   sem: SemanticContext,
   name: string,
@@ -1000,8 +1251,8 @@ connection.onCompletion((params): CompletionItem[] => {
     end: params.position
   });
 
-  const annotationItems = annotationCompletionItems(prefix);
-  if (annotationItems) return annotationItems;
+  const annotationItems = annotationCompletionItems(prefix, params.position);
+  if (annotationItems.length) return annotationItems;
 
   const scopeMatch = prefix.match(/\b([A-Za-z_]\w*)::([A-Za-z_]\w*)?$/);
   if (scopeMatch) {

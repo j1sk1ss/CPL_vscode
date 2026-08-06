@@ -264,21 +264,21 @@
     ],
     "description": "Two stacked annotations"
   },
-  "generic-function-definition": {
+  "generic-associated-method-definition": {
     "scope": "cpl",
     "prefix": "gfunction",
     "body": [
-      "function ${1:name}<${2:T}>(${2:T} ${3:a})${4: -> ${2:T}} {",
-      "\t${0:return ${3:a};}",
+      "function ${1:container}::${2:name}<${3:T}>(${3:T} ${4:a})${5: -> ${3:T}} {",
+      "\t${0:return ${4:a};}",
       "}"
     ],
-    "description": "Generic function definition"
+    "description": "Generic associated method definition"
   },
   "generic-function-call": {
     "scope": "cpl",
     "prefix": "gcall",
     "body": "${1:container}::${2:function}<${3:i32}>(${0})",
-    "description": "Generic function or associated method call"
+    "description": "Generic associated method call"
   },
   "associated-method-definition": {
     "scope": "cpl",

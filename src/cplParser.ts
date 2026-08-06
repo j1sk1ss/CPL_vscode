@@ -1,5 +1,14 @@
 import { Range, Position } from "vscode-languageserver/node";
-import { SemanticContext, MacroValue, TypeNode, MacroCondition, CallArg, formatType } from "./cplSemantics";
+import {
+  SemanticContext,
+  MacroValue,
+  TypeNode,
+  MacroCondition,
+  CallArg,
+  formatType,
+  IssueSeverity,
+  implicitIntegerCastIssue
+} from "./cplSemantics";
 import { CplPredefinedMacro } from "./cplTarget";
 
 function buildLineStarts(text: string): number[] {
@@ -175,6 +184,7 @@ type ExprInfo = {
   explicitRef?: boolean;
   requiresExplicitRefForPtr?: boolean;
   isStringLiteral?: boolean;
+  intLiteralValue?: bigint;
   associatedContainerName?: string;
   associatedMethodName?: string;
   instanceContainerName?: string;
@@ -183,7 +193,13 @@ type ExprInfo = {
   end?: number;
 };
 
-type ParseIssue = { message: string; range: Range; severity?: "error" | "warning" };
+type ParseIssue = {
+  message: string;
+  range: Range;
+  severity?: IssueSeverity;
+  code?: string;
+  data?: { castType?: string };
+};
 
 const KEYWORDS = new Set([
   // top-level / statements
@@ -276,6 +292,23 @@ function parseIntLiteral(s: string): number {
   if (s.startsWith("0x") || s.startsWith("0X")) return parseInt(s.slice(2), 16);
   if (s.startsWith("0b") || s.startsWith("0B")) return parseInt(s.slice(2), 2);
   return parseInt(s, 10);
+}
+
+function parseIntLiteralBigInt(s: string): bigint | undefined {
+  const normalized = s.replace(/^0X/, "0x").replace(/^0B/, "0b");
+  try {
+    return BigInt(normalized);
+  } catch {
+    return undefined;
+  }
+}
+
+function integerLiteralType(value: bigint): TypeNode {
+  if (value >= -128n && value <= 127n) return { kind: "prim", name: "i8" };
+  if (value >= -32768n && value <= 32767n) return { kind: "prim", name: "i16" };
+  if (value >= -2147483648n && value <= 2147483647n) return { kind: "prim", name: "i32" };
+  if (value >= -9223372036854775808n && value <= 9223372036854775807n) return { kind: "prim", name: "i64" };
+  return { kind: "prim", name: "u64" };
 }
 
 function lex(text: string): Token[] {
@@ -447,6 +480,7 @@ class Parser {
   private pendingAnnotations: string[] = [];
   private typeParamScopes: string[][] = [];
   private returnTypeStack: (TypeNode | undefined)[] = [];
+  private sectionStack: string[] = [];
   private ppConditionStack: MacroCondition[];
 
   constructor(
@@ -782,6 +816,12 @@ class Parser {
       message: `${subject} requires explicit 'ref' when '${formatType(expected)}' is expected`,
       range: this.exprRange(expr)
     });
+  }
+
+  private checkImplicitIntegerCastExpected(expected: TypeNode | undefined, expr: ExprInfo) {
+    if (!expected) return;
+    const issue = implicitIntegerCastIssue(expected, expr.type, this.exprRange(expr));
+    if (issue) this.issues.push(issue);
   }
 
   private parseProgram() {
@@ -1308,7 +1348,8 @@ class Parser {
       let hasDefault = false;
       if (this.match("op", "=")) {
         hasDefault = true;
-        this.parseExpression();
+        const init = this.parseExpression();
+        this.checkImplicitIntegerCastExpected(t, init);
       }
 
       params.push({
@@ -1580,7 +1621,7 @@ class Parser {
         annotations
       });
       this.linkPendingDoc(`${containerName}.${arr.name}`, arr.range);
-      this.parseOptionalArrayInitializer();
+      this.parseOptionalArrayInitializer(arr.type.kind === "arr" ? arr.type.elem : undefined);
       this.consumeStmtEnd("container arr field: expected ';' or end-of-line");
       return;
     }
@@ -1604,6 +1645,7 @@ class Parser {
     if (this.match("op", "=")) {
       const init = this.parseExpression();
       this.checkExplicitRefForPtrExpected(fieldType, init);
+      this.checkImplicitIntegerCastExpected(fieldType, init);
     }
     this.consumeStmtEnd("container field: expected ';' or end-of-line");
   }
@@ -1728,98 +1770,105 @@ class Parser {
   private parseSectionStmt() {
     this.expect("kw", "section");
     this.expect("punc", "(", "section: expected '('");
+    const sectionTok = this.cur();
     this.expect("str", undefined, "section: expected string literal");
+    const sectionName = sectionTok.kind === "str" ? unquote(sectionTok.text) : "";
     this.expect("punc", ")", "section: expected ')'");
     this.expect("punc", "{", "section: expected '{'");
+    this.sectionStack.push(sectionName);
 
-    while (!this.at("eof") && !this.at("punc", "}")) {
-      if (this.atRaw("comment")) {
-        const tok = this.curRaw();
-        this.i++;
-        this.captureDocComment(tok);
-        continue;
-      }
-
-      if (this.atRaw("punc", "@")) {
-        const ann = this.parseAnnotation();
-        if (ann) this.pendingAnnotations.push(ann);
-        continue;
-      }
-
-      if (this.atRaw("punc", "#")) {
-        this.parsePPDirective();
-        continue;
-      }
-
-      if (this.at("punc", "{")) {
-        this.parseBlock();
-        this.pendingDoc = undefined;
-        this.clearPendingMetadata();
-        continue;
-      }
-
-      if (this.match("kw", "start")) {
-        this.parseStartAfterKeyword();
-        this.pendingDoc = undefined;
-        this.clearPendingMetadata();
-        continue;
-      }
-
-      if (this.at("kw", "align")) {
-        this.parseAlignStmt(true);
-        this.pendingDoc = undefined;
-        this.clearPendingMetadata();
-        continue;
-      }
-
-      {
-        const modsPos = this.i;
-        const mods = this.parseStorageMods();
-        if (mods.isGlobal || mods.isReadonly) {
-          if (this.match("kw", "function")) {
-            const doc = this.pendingDoc;
-            this.pendingDoc = undefined;
-            this.parseFunctionAfterKeyword(doc, mods);
-            this.clearPendingMetadata();
-            continue;
-          }
-          this.i = modsPos;
+    try {
+      while (!this.at("eof") && !this.at("punc", "}")) {
+        if (this.atRaw("comment")) {
+          const tok = this.curRaw();
+          this.i++;
+          this.captureDocComment(tok);
+          continue;
         }
-      }
 
-      if (this.match("kw", "container")) {
-        const doc = this.pendingDoc;
-        this.pendingDoc = undefined;
-        this.parseContainerAfterKeyword(doc);
+        if (this.atRaw("punc", "@")) {
+          const ann = this.parseAnnotation();
+          if (ann) this.pendingAnnotations.push(ann);
+          continue;
+        }
+
+        if (this.atRaw("punc", "#")) {
+          this.parsePPDirective();
+          continue;
+        }
+
+        if (this.at("punc", "{")) {
+          this.parseBlock();
+          this.pendingDoc = undefined;
+          this.clearPendingMetadata();
+          continue;
+        }
+
+        if (this.match("kw", "start")) {
+          this.parseStartAfterKeyword();
+          this.pendingDoc = undefined;
+          this.clearPendingMetadata();
+          continue;
+        }
+
+        if (this.at("kw", "align")) {
+          this.parseAlignStmt(true);
+          this.pendingDoc = undefined;
+          this.clearPendingMetadata();
+          continue;
+        }
+
+        {
+          const modsPos = this.i;
+          const mods = this.parseStorageMods();
+          if (mods.isGlobal || mods.isReadonly) {
+            if (this.match("kw", "function")) {
+              const doc = this.pendingDoc;
+              this.pendingDoc = undefined;
+              this.parseFunctionAfterKeyword(doc, mods);
+              this.clearPendingMetadata();
+              continue;
+            }
+            this.i = modsPos;
+          }
+        }
+
+        if (this.match("kw", "container")) {
+          const doc = this.pendingDoc;
+          this.pendingDoc = undefined;
+          this.parseContainerAfterKeyword(doc);
+          this.clearPendingMetadata();
+          continue;
+        }
+
+        if (this.match("kw", "function")) {
+          const doc = this.pendingDoc;
+          this.pendingDoc = undefined;
+          this.parseFunctionAfterKeyword(doc);
+          this.clearPendingMetadata();
+          continue;
+        }
+
+        if (this.looksLikeDeclStart()) {
+          this.parseVarOrArrDecl(true);
+          this.pendingDoc = undefined;
+          this.clearPendingMetadata();
+          continue;
+        }
+
+        const c = this.cur();
+        this.issues.push({
+          message: "section: expected declaration/function/start/scope/align/preprocessor",
+          range: rangeOf(this.lines, c.start, c.end)
+        });
+        this.syncToStatementEnd();
         this.clearPendingMetadata();
-        continue;
       }
 
-      if (this.match("kw", "function")) {
-        const doc = this.pendingDoc;
-        this.pendingDoc = undefined;
-        this.parseFunctionAfterKeyword(doc);
-        this.clearPendingMetadata();
-        continue;
-      }
-
-      if (this.looksLikeDeclStart()) {
-        this.parseVarOrArrDecl(true);
-        this.pendingDoc = undefined;
-        this.clearPendingMetadata();
-        continue;
-      }
-
-      const c = this.cur();
-      this.issues.push({
-        message: "section: expected declaration/function/start/scope/align/preprocessor",
-        range: rangeOf(this.lines, c.start, c.end)
-      });
-      this.syncToStatementEnd();
-      this.clearPendingMetadata();
+      this.expect("punc", "}", "section: expected '}'");
+    } finally {
+      this.sectionStack.pop();
     }
-
-    this.expect("punc", "}", "section: expected '}'");
   }
   
   private parseStorageMods(): StorageMods {
@@ -1946,6 +1995,7 @@ class Parser {
       if (!this.at("punc", ";")) {
         const ret = this.parseExpression();
         this.checkExplicitRefForPtrExpected(this.currentReturnType(), ret);
+        this.checkImplicitIntegerCastExpected(this.currentReturnType(), ret);
       }
       this.expect("punc", ";");
       return;
@@ -2100,26 +2150,30 @@ class Parser {
     return { name, type: arrType, range: rangeOf(this.lines, nameTok.start, nameTok.end) };
   }
 
-  private parseOptionalArrayInitializer() {
-    if (!this.match("op", "=")) return;
+  private parseOptionalArrayInitializer(expectedElemType?: TypeNode): boolean {
+    if (!this.match("op", "=")) return false;
 
     if (this.match("punc", "{")) {
       this.skipInnerComments();
       if (!this.at("punc", "}")) {
-        this.parseExpression();
+        const first = this.parseExpression();
+        this.checkImplicitIntegerCastExpected(expectedElemType, first);
         this.skipInnerComments();
         while (this.match("punc", ",")) {
           this.skipInnerComments();
           if (this.at("punc", "}")) break;
-          this.parseExpression();
+          const item = this.parseExpression();
+          this.checkImplicitIntegerCastExpected(expectedElemType, item);
           this.skipInnerComments();
         }
       }
       this.expect("punc", "}", "arr_value: expected '}'");
-      return;
+      return true;
     }
 
-    this.parseExpression();
+    const init = this.parseExpression();
+    this.checkImplicitIntegerCastExpected(expectedElemType, init);
+    return true;
   }
 
   private parseVarOrArrDecl(isTopLevel: boolean) {
@@ -2129,12 +2183,18 @@ class Parser {
 
     if (this.looksLikeArrDeclForm()) {
       const arr = this.parseArrDeclHeader("arr_decl");
-      const opts = { readonly: mods.isReadonly, annotations };
+      const hasInitializer = this.at("op", "=");
+      const opts = {
+        readonly: mods.isReadonly,
+        annotations,
+        hasInitializer,
+        hasSectionPlacement: this.sectionStack.length > 0
+      };
       if (isTopLevel) this.sem?.declareGlobalVar(arr.name, arr.type, arr.range, opts);
       else this.sem?.declareLocalVar(arr.name, arr.type, arr.range, opts);
       this.linkPendingDoc(arr.name, arr.range);
 
-      this.parseOptionalArrayInitializer();
+      this.parseOptionalArrayInitializer(arr.type.kind === "arr" ? arr.type.elem : undefined);
       this.consumeStmtEnd("arr_decl: expected ';' or end-of-line");
       return;
     }
@@ -2149,7 +2209,13 @@ class Parser {
     const vName = this.prev().text;
 
     const declRange = rangeOf(this.lines, nameTok.start, nameTok.end);
-    const opts = { readonly: mods.isReadonly, annotations };
+    const hasInitializer = this.at("op", "=");
+    const opts = {
+      readonly: mods.isReadonly,
+      annotations,
+      hasInitializer,
+      hasSectionPlacement: this.sectionStack.length > 0
+    };
     if (isTopLevel) this.sem?.declareGlobalVar(vName, vType, declRange, opts);
     else this.sem?.declareLocalVar(vName, vType, declRange, opts);
     this.linkPendingDoc(vName, declRange);
@@ -2157,6 +2223,7 @@ class Parser {
     if (this.match("op", "=")) {
       const init = this.parseExpression();
       this.checkExplicitRefForPtrExpected(vType, init);
+      this.checkImplicitIntegerCastExpected(vType, init);
     }
     this.consumeStmtEnd("var_decl: expected ';' or end-of-line");
   }
@@ -2335,7 +2402,10 @@ class Parser {
       const op = this.cur().text;
       this.i++;
       const right = this.parseAssign();
-      if (op === "=") this.checkExplicitRefForPtrExpected(left.type, right);
+      if (op === "=") {
+        this.checkExplicitRefForPtrExpected(left.type, right);
+        this.checkImplicitIntegerCastExpected(left.type, right);
+      }
       left = { type: right.type, start: left.start, end: right.end };
     }
     return left;
@@ -2412,7 +2482,15 @@ class Parser {
       const opTok = this.cur();
       this.i++;
       const inner = this.parseUnary();
-      return { type: inner.type, start: opTok.start, end: inner.end ?? opTok.end };
+      const intLiteralValue = inner.intLiteralValue == null
+        ? undefined
+        : opTok.text === "-" ? -inner.intLiteralValue : inner.intLiteralValue;
+      return {
+        type: intLiteralValue == null ? inner.type : integerLiteralType(intLiteralValue),
+        start: opTok.start,
+        end: inner.end ?? opTok.end,
+        intLiteralValue
+      };
     }
     return this.parsePostfix();
   }
@@ -2626,7 +2704,13 @@ class Parser {
 
     if (this.at("int")) {
       const tok = this.cur(); this.i++;
-      return { type: { kind: "prim", name: "i64" }, start: tok.start, end: tok.end };
+      const intLiteralValue = parseIntLiteralBigInt(tok.text);
+      return {
+        type: intLiteralValue == null ? { kind: "prim", name: "i64" } : integerLiteralType(intLiteralValue),
+        start: tok.start,
+        end: tok.end,
+        intLiteralValue
+      };
     }
 
     if (this.at("float")) {
