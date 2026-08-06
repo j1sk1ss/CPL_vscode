@@ -1173,9 +1173,9 @@ export class SemanticContext {
     const local = this.scope.funcs.get(name) ?? [];
 
     const exact = local.find((f) => sameParamIdentity(f.params, params));
-    if (hasTypeParams(typeParams)) {
+    if (opts?.global && hasTypeParams(typeParams)) {
       this.issues.push({
-        message: `Global generic function '${name}' is not allowed; declare generic functions as container methods`,
+        message: `Generic glob function '${name}' is not allowed; remove 'glob' or declare it as a container method`,
         range
       });
     }
