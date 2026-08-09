@@ -1453,30 +1453,32 @@ class Parser {
     }
 
     this.linkPendingDoc(containerName ? `${containerName}::${fnName}` : fnName, fnRange, doc);
-    if (containerName) {
-      this.sem?.declareContainerMethod(containerName, fnName, paramsInfo, ret, fnRange, true, doc, typeParams, semanticOpts);
-    } else {
-      this.sem?.declareFunc(fnName, paramsInfo, ret, fnRange, true, doc, typeParams, {
+    const fnSym = containerName
+      ? this.sem?.declareContainerMethod(containerName, fnName, paramsInfo, ret, fnRange, true, doc, typeParams, semanticOpts)
+      : this.sem?.declareFunc(fnName, paramsInfo, ret, fnRange, true, doc, typeParams, {
         global: mods.isGlobal,
         annotations
       });
-    }
 
+    this.sem?.enterFunctionBody(fnSym);
     this.sem?.enterScope();
-    if (containerName && selfType) this.declareImplicitSelfIfNeeded(hasSelfAnnotation, selfType, fnRange, paramsInfo);
-    for (const p of paramsInfo) {
-      this.sem?.declareLocalVar(p.name, p.type, p.range, { annotations: p.annotations });
-    }
-
-    this.returnTypeStack.push(ret);
     try {
-      this.parseBlock(true);
-    } finally {
-      this.returnTypeStack.pop();
-    }
+      if (containerName && selfType) this.declareImplicitSelfIfNeeded(hasSelfAnnotation, selfType, fnRange, paramsInfo);
+      for (const p of paramsInfo) {
+        this.sem?.declareLocalVar(p.name, p.type, p.range, { annotations: p.annotations });
+      }
 
-    this.sem?.exitScope();
-    this.exitTypeParamScope();
+      this.returnTypeStack.push(ret);
+      try {
+        this.parseBlock(true);
+      } finally {
+        this.returnTypeStack.pop();
+      }
+    } finally {
+      this.sem?.exitScope();
+      this.sem?.exitFunctionBody();
+      this.exitTypeParamScope();
+    }
   }
 
 
@@ -1590,23 +1592,37 @@ class Parser {
     }
 
     this.linkPendingDoc(`${containerName}::${fnName}`, fnRange, doc);
-    this.sem?.declareContainerMethod(containerName, fnName, paramsInfo, ret, fnRange, true, doc, typeParams, semanticOpts);
+    const fnSym = this.sem?.declareContainerMethod(
+      containerName,
+      fnName,
+      paramsInfo,
+      ret,
+      fnRange,
+      true,
+      doc,
+      typeParams,
+      semanticOpts
+    );
 
+    this.sem?.enterFunctionBody(fnSym);
     this.sem?.enterScope();
-    this.declareImplicitSelfIfNeeded(hasSelfAnnotation, selfType, fnRange, paramsInfo);
-    for (const p of paramsInfo) {
-      this.sem?.declareLocalVar(p.name, p.type, p.range, { annotations: p.annotations });
-    }
-
-    this.returnTypeStack.push(ret);
     try {
-      this.parseBlock(true);
-    } finally {
-      this.returnTypeStack.pop();
-    }
+      this.declareImplicitSelfIfNeeded(hasSelfAnnotation, selfType, fnRange, paramsInfo);
+      for (const p of paramsInfo) {
+        this.sem?.declareLocalVar(p.name, p.type, p.range, { annotations: p.annotations });
+      }
 
-    this.sem?.exitScope();
-    this.exitTypeParamScope();
+      this.returnTypeStack.push(ret);
+      try {
+        this.parseBlock(true);
+      } finally {
+        this.returnTypeStack.pop();
+      }
+    } finally {
+      this.sem?.exitScope();
+      this.sem?.exitFunctionBody();
+      this.exitTypeParamScope();
+    }
   }
 
   private parseContainerFieldDecl(containerName: string) {

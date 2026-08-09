@@ -88,6 +88,7 @@ export type VarSym = {
 
 export const UNINITIALIZED_GLOBAL_STORAGE_CODE = "cpl.uninitializedGlobalStorage";
 export const IMPLICIT_INTEGER_CAST_CODE = "cpl.implicitIntegerCast";
+export const MISSING_ABI_FOR_ABI_CALL_CODE = "cpl.missingAbiForAbiCall";
 
 export type FuncOverloadSym = {
   kind: "func";
@@ -598,9 +599,12 @@ export class SemanticContext {
 
   private currentFilePath: string | undefined;
   private scope: Scope = new Scope();
-  private pendingCalls: { name: string; args: CallArg[]; range: Range; filePath?: string; scope: Scope }[] = [];
-  private pendingAssociatedCalls: { containerName: string; name: string; args: CallArg[]; range: Range; filePath?: string }[] = [];
-  private pendingInstanceCalls: { containerName: string; name: string; args: CallArg[]; range: Range; filePath?: string }[] = [];
+  private currentFunction: FuncOverloadSym | undefined;
+  private currentFunctionStack: (FuncOverloadSym | undefined)[] = [];
+  private abiCallWarnings = new Set<string>();
+  private pendingCalls: { name: string; args: CallArg[]; range: Range; filePath?: string; scope: Scope; caller?: FuncOverloadSym }[] = [];
+  private pendingAssociatedCalls: { containerName: string; name: string; args: CallArg[]; range: Range; filePath?: string; caller?: FuncOverloadSym }[] = [];
+  private pendingInstanceCalls: { containerName: string; name: string; args: CallArg[]; range: Range; filePath?: string; caller?: FuncOverloadSym }[] = [];
 
   constructor(private readonly options: SemanticContextOptions = {}) {}
 
@@ -773,11 +777,11 @@ export class SemanticContext {
     doc?: string,
     typeParams?: string[],
     opts?: { self?: boolean; global?: boolean; annotations?: string[] }
-  ) {
+  ): FuncOverloadSym | undefined {
     const container = this.containers.get(containerName);
     if (!container) {
       this.issues.push({ message: `Unknown container '${containerName}'`, range });
-      return;
+      return undefined;
     }
 
     const local = container.methods.get(name) ?? [];
@@ -834,7 +838,7 @@ export class SemanticContext {
       const all = this.funcs.get(qualifiedName) ?? [];
       all.push(sym);
       this.funcs.set(qualifiedName, all);
-      return;
+      return sym;
     }
 
     if (!sameType(exact.ret, ret)) {
@@ -842,7 +846,7 @@ export class SemanticContext {
         message: `Method '${containerName}.${name}' overload with same parameters has different return type`,
         range
       });
-      return;
+      return undefined;
     }
 
     if (doc && !exact.doc) exact.doc = doc;
@@ -868,13 +872,13 @@ export class SemanticContext {
     if (isDefinition) {
       if (exact.def) {
         this.issues.push({ message: `Method '${containerName}.${name}' overload already defined`, range });
-        return;
+        return undefined;
       }
       exact.def = range;
       exact.defFilePath = this.currentFilePath;
       exact.primaryRange = range;
       exact.primaryFilePath = this.currentFilePath;
-      return;
+      return exact;
     }
 
     exact.decls.push(range);
@@ -883,6 +887,7 @@ export class SemanticContext {
       exact.primaryRange = exact.decls[0];
       exact.primaryFilePath = this.currentFilePath;
     }
+    return exact;
   }
 
   getContainerMember(
@@ -1077,6 +1082,15 @@ export class SemanticContext {
     if (this.scope.parent) this.scope = this.scope.parent;
   }
 
+  enterFunctionBody(fn: FuncOverloadSym | undefined) {
+    this.currentFunctionStack.push(this.currentFunction);
+    this.currentFunction = fn;
+  }
+
+  exitFunctionBody() {
+    this.currentFunction = this.currentFunctionStack.pop();
+  }
+
   declareExternGlobalVar(
     name: string,
     type: TypeNode,
@@ -1169,7 +1183,7 @@ export class SemanticContext {
     doc?: string,
     typeParams?: string[],
     opts?: { global?: boolean; annotations?: string[] }
-  ) {
+  ): FuncOverloadSym | undefined {
     const local = this.scope.funcs.get(name) ?? [];
 
     const exact = local.find((f) => sameParamIdentity(f.params, params));
@@ -1220,7 +1234,7 @@ export class SemanticContext {
       const all = this.funcs.get(name) ?? [];
       all.push(sym);
       this.funcs.set(name, all);
-      return;
+      return sym;
     }
 
     if (!sameType(exact.ret, ret)) {
@@ -1228,7 +1242,7 @@ export class SemanticContext {
         message: `Function '${name}' overload with same parameters has different return type`,
         range
       });
-      return;
+      return undefined;
     }
 
     if (doc && !exact.doc) exact.doc = doc;
@@ -1253,13 +1267,13 @@ export class SemanticContext {
     if (isDefinition) {
       if (exact.def) {
         this.issues.push({ message: `Function '${name}' overload already defined`, range });
-        return;
+        return undefined;
       }
       exact.def = range;
       exact.defFilePath = this.currentFilePath;
       exact.primaryRange = range;
       exact.primaryFilePath = this.currentFilePath;
-      return;
+      return exact;
     }
 
     exact.decls.push(range);
@@ -1268,6 +1282,7 @@ export class SemanticContext {
       exact.primaryRange = exact.decls[0];
       exact.primaryFilePath = this.currentFilePath;
     }
+    return exact;
   }
 
   noteCallSite(name: string, range: Range) {
@@ -1451,10 +1466,52 @@ export class SemanticContext {
     }
   }
 
+  private displayFunctionName(fn: FuncOverloadSym): string {
+    return fn.containerName ? `${fn.containerName}::${fn.name}` : fn.name;
+  }
+
+  private functionWarningKey(fn: FuncOverloadSym): string {
+    const range = fn.decls[0] ?? fn.def ?? fn.primaryRange;
+    return [
+      fn.primaryFilePath ?? fn.defFilePath ?? fn.declFiles?.[0] ?? "",
+      range.start.line,
+      range.start.character,
+      fn.containerName ?? "",
+      fn.name
+    ].join(":");
+  }
+
+  private maybeWarnMissingAbiForAbiCall(
+    caller: FuncOverloadSym | undefined,
+    callee: FuncOverloadSym | undefined
+  ) {
+    if (!caller || !callee) return;
+    if (!hasAnnotation(callee.annotations, "abi")) return;
+    if (hasAnnotation(caller.annotations, "abi") || hasAnnotation(caller.annotations, "entry")) return;
+
+    const key = this.functionWarningKey(caller);
+    if (this.abiCallWarnings.has(key)) return;
+    this.abiCallWarnings.add(key);
+
+    this.issues.push({
+      message: `Function '${this.displayFunctionName(caller)}' calls ABI function '${this.displayFunctionName(callee)}'; add @[abi] to this function unless it is the start/entry point`,
+      range: caller.decls[0] ?? caller.def ?? caller.primaryRange,
+      severity: "warning",
+      code: MISSING_ABI_FOR_ABI_CALL_CODE
+    });
+  }
+
   callFunc(name: string, args: CallArg[], range: Range) {
     if (name === "syscall") return;
     const argc = args.length;
-    this.pendingCalls.push({ name, args, range, filePath: this.currentFilePath, scope: this.scope });
+    this.pendingCalls.push({
+      name,
+      args,
+      range,
+      filePath: this.currentFilePath,
+      scope: this.scope,
+      caller: this.currentFunction
+    });
     this.upsertCallSite(name, argc, range, this.resolveCall(name, argc, this.scope));
   }
 
@@ -1498,7 +1555,14 @@ export class SemanticContext {
     const qualifiedName = this.qualifiedMethodName(containerName, name);
     const argc = args.length;
     const resolution = this.resolveAssociatedCall(containerName, name, argc);
-    this.pendingAssociatedCalls.push({ containerName, name, args, range, filePath: this.currentFilePath });
+    this.pendingAssociatedCalls.push({
+      containerName,
+      name,
+      args,
+      range,
+      filePath: this.currentFilePath,
+      caller: this.currentFunction
+    });
     this.upsertCallSite(qualifiedName, argc, range, resolution);
   }
 
@@ -1506,7 +1570,14 @@ export class SemanticContext {
     const qualifiedName = this.qualifiedMethodName(containerName, name);
     const argc = args.length;
     const resolution = this.resolveInstanceCall(containerName, name, argc);
-    this.pendingInstanceCalls.push({ containerName, name, args, range, filePath: this.currentFilePath });
+    this.pendingInstanceCalls.push({
+      containerName,
+      name,
+      args,
+      range,
+      filePath: this.currentFilePath,
+      caller: this.currentFunction
+    });
     this.upsertCallSite(qualifiedName, argc, range, resolution);
   }
 
@@ -1590,6 +1661,9 @@ export class SemanticContext {
 
       this.checkExplicitRefArgs(resolution.candidates, c.args);
       this.checkImplicitIntegerCastArgs(resolution.candidates, c.args);
+      if (resolution.status === "resolved") {
+        this.maybeWarnMissingAbiForAbiCall(c.caller, resolution.selected);
+      }
     }
 
     for (const c of this.pendingInstanceCalls) {
@@ -1636,6 +1710,9 @@ export class SemanticContext {
 
       this.checkExplicitRefArgs(resolution.candidates, c.args, instanceCallParams);
       this.checkImplicitIntegerCastArgs(resolution.candidates, c.args, instanceCallParams);
+      if (resolution.status === "resolved") {
+        this.maybeWarnMissingAbiForAbiCall(c.caller, resolution.selected);
+      }
     }
 
     for (const c of this.pendingCalls) {
@@ -1664,6 +1741,9 @@ export class SemanticContext {
 
       this.checkExplicitRefArgs(resolution.candidates, c.args);
       this.checkImplicitIntegerCastArgs(resolution.candidates, c.args);
+      if (resolution.status === "resolved") {
+        this.maybeWarnMissingAbiForAbiCall(c.caller, resolution.selected);
+      }
     }
 
     this.pendingAssociatedCalls = [];
