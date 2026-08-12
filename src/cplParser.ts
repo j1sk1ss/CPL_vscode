@@ -1384,6 +1384,34 @@ class Parser {
     this.parseStatement();
   }
 
+  private parseSwitchCaseBody() {
+    if (this.at("punc", "{")) {
+      this.parseBlock();
+      return;
+    }
+
+    if (
+      this.at("eof") ||
+      this.at("punc", "}") ||
+      this.at("kw", "case") ||
+      this.at("kw", "default")
+    ) {
+      const c = this.cur();
+      this.issues.push({
+        message: "switch case: expected statement or block",
+        range: rangeOf(this.lines, c.start, c.end)
+      });
+      return;
+    }
+
+    this.sem?.enterScope();
+    try {
+      this.parseStatement();
+    } finally {
+      this.sem?.exitScope();
+    }
+  }
+
   private parseStartAfterKeyword() {
     const startAnnotations = this.takePendingAnnotations();
     this.expect("punc", "(");
@@ -1994,12 +2022,12 @@ class Parser {
       while (this.match("kw", "case")) {
         this.parseLiteral();
         this.expect("punc", ";", "case: expected ';'");
-        this.parseBlock();
+        this.parseSwitchCaseBody();
       }
 
       if (this.match("kw", "default")) {
         this.match("punc", ";");
-        this.parseBlock();
+        this.parseSwitchCaseBody();
       }
 
       this.expect("punc", "}", "switch: expected '}'");
