@@ -17,6 +17,14 @@
     ],
     "description": "Function prototype (return type optional)"
   },
+  "function-signature-variable": {
+    "scope": "cpl",
+    "prefix": "fnsig",
+    "body": [
+      "ptr fn(${1:i32, i32})${2:i32} ${3:name};"
+    ],
+    "description": "Function signature variable"
+  },
   "container-definition": {
     "scope": "cpl",
     "prefix": "container",

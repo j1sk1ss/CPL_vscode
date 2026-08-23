@@ -214,7 +214,7 @@
         },
         {
           "name": "storage.type.other.cpl",
-          "match": "\\b(str|arr|ptr)\\b"
+          "match": "\\b(str|arr|ptr|fn)\\b"
         },
         {
           "name": "storage.type.user.cpl",
@@ -353,6 +353,15 @@
         {
           "name": "variable.other.definition.cpl",
           "match": "\\barr\\s*\\[[^\\]\\r\\n]+\\]\\s+([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*(?:=|;|,|\\)))",
+          "captures": {
+            "1": {
+              "name": "variable.other.definition.cpl"
+            }
+          }
+        },
+        {
+          "name": "variable.other.definition.cpl",
+          "match": "\\b(?:ptr\\s+)*fn\\s*\\([^\\r\\n;{}]*\\)\\s*(?:ptr\\s+)*(?:f64|f32|i64|i32|i16|i8|u64|u32|u16|u8|i0|str|arr|[A-Za-z_][A-Za-z0-9_]*)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*(?:=|;|,|\\)|\\[))",
           "captures": {
             "1": {
               "name": "variable.other.definition.cpl"

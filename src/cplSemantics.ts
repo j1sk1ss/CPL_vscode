@@ -56,7 +56,7 @@ export function formatType(t: TypeNode): string {
     case "arr":
       return `arr[${t.len ?? "?"}, ${formatType(t.elem)}]`;
     case "func":
-      return `(${t.params.map(formatType).join(", ")}) => ${formatType(t.ret)}`;
+      return `fn(${t.params.map(formatType).join(", ")})${formatType(t.ret)}`;
     case "container":
       return t.name;
     default:

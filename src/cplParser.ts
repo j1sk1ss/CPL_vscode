@@ -207,11 +207,11 @@ const KEYWORDS = new Set([
   "if","else","while","loop","switch","case","default",
   "glob","ro","dref","ref","ptr","lis","break","extern","from","import","syscall","asm","as",
   "f64","f32","i64","i32","i16","i8","u64","u32","u16","u8","i0","str","arr","not","neg","poparg","sizeof",
-  "section","align"
+  "section","align","fn"
 ]);
 
 const TYPE_KW = new Set([
-  "f64","f32","i64","i32","i16","i8","u64","u32","u16","u8","i0","str","arr","ptr"
+  "f64","f32","i64","i32","i16","i8","u64","u32","u16","u8","i0","str","arr","ptr","fn"
 ]);
 
 function valueRequiresExplicitRefForPtr(t: TypeNode): boolean {
@@ -2289,6 +2289,23 @@ class Parser {
     if (this.match("kw", "ptr")) {
       const to = this.parseType();
       return { kind: "ptr", to };
+    }
+
+    if (this.match("kw", "fn")) {
+      const params: TypeNode[] = [];
+      this.expect("punc", "(", "signature type: expected '(' after 'fn'");
+
+      if (!this.at("punc", ")")) {
+        params.push(this.parseType());
+        while (this.match("punc", ",")) {
+          if (this.at("punc", ")")) break;
+          params.push(this.parseType());
+        }
+      }
+
+      this.expect("punc", ")", "signature type: expected ')'");
+      const ret = this.parseType();
+      return { kind: "func", params, ret };
     }
 
     if (this.match("kw", "arr")) {
