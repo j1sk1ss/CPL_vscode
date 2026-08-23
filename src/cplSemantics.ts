@@ -435,14 +435,20 @@ export function implicitIntegerCastIssue(expected: TypeNode, actual: TypeNode, r
   };
 }
 
+function callableSignature(t: TypeNode): Extract<TypeNode, { kind: "func" }> | undefined {
+  if (t.kind === "func") return t;
+  if (t.kind === "ptr" && t.to.kind === "func") return t.to;
+  return undefined;
+}
+
 function isCallableType(t: TypeNode): boolean {
-  return t.kind === "func"
+  return callableSignature(t) !== undefined
     || (t.kind === "ptr" && t.to.kind === "prim" && t.to.name === "i0");
 }
 
 function matchesCallableArity(t: TypeNode, argc: number): boolean {
-  if (t.kind === "func") return t.params.length === argc;
-  return true;
+  const signature = callableSignature(t);
+  return signature ? signature.params.length === argc : true;
 }
 
 function sameParamIdentity(a: ParamSig[], b: ParamSig[]): boolean {
@@ -1527,16 +1533,17 @@ export class SemanticContext {
     const vt = this.getVarType(name);
     if (vt) {
       if (isCallableType(vt)) {
+        const signature = callableSignature(vt);
         if (!matchesCallableArity(vt, argc)) {
           this.issues.push({
-            message: `Expression '${name}' is callable, but expects ${vt.kind === "func" ? vt.params.length : "compatible"} args`,
+            message: `Expression '${name}' is callable, but expects ${signature?.params.length ?? "compatible"} args`,
             range
           });
           return;
         }
-        if (vt.kind === "func") {
-          this.checkExplicitRefParamTypes(vt.params, args);
-          this.checkImplicitIntegerCastParamTypes(vt.params, args);
+        if (signature) {
+          this.checkExplicitRefParamTypes(signature.params, args);
+          this.checkImplicitIntegerCastParamTypes(signature.params, args);
         }
         this.indirectCallSites.push({ argc, range, filePath: this.currentFilePath, calleeType: vt });
         return;
@@ -1595,16 +1602,17 @@ export class SemanticContext {
     const argc = args.length;
 
     if (isCallableType(calleeType)) {
+      const signature = callableSignature(calleeType);
       if (!matchesCallableArity(calleeType, argc)) {
         this.issues.push({
-          message: `Expression is callable, but expects ${calleeType.kind === "func" ? calleeType.params.length : "compatible"} args`,
+          message: `Expression is callable, but expects ${signature?.params.length ?? "compatible"} args`,
           range
         });
         return;
       }
-      if (calleeType.kind === "func") {
-        this.checkExplicitRefParamTypes(calleeType.params, args);
-        this.checkImplicitIntegerCastParamTypes(calleeType.params, args);
+      if (signature) {
+        this.checkExplicitRefParamTypes(signature.params, args);
+        this.checkImplicitIntegerCastParamTypes(signature.params, args);
       }
       this.indirectCallSites.push({ argc, range, filePath: this.currentFilePath, calleeType });
       return;
