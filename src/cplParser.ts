@@ -1517,8 +1517,20 @@ class Parser {
     this.expect("ident", undefined, "container: expected identifier");
     const containerName = this.prev().text;
     const containerRange = rangeOf(this.lines, nameTok.start, nameTok.end);
+    let baseName: string | undefined;
+    let baseRange: Range | undefined;
 
-    this.sem?.declareContainer(containerName, containerRange, doc, { annotations });
+    if (this.match("op", "::")) {
+      const baseTok = this.cur();
+      this.expect("ident", undefined, "container: expected inheritance base after '::'");
+      if (baseTok.kind === "ident") {
+        baseName = baseTok.text;
+        baseRange = rangeOf(this.lines, baseTok.start, baseTok.end);
+        this.sem?.useContainer(baseName, baseRange);
+      }
+    }
+
+    this.sem?.declareContainer(containerName, containerRange, doc, { annotations, baseName, baseRange });
     this.linkPendingDoc(containerName, containerRange, doc);
 
     this.expect("punc", "{", "container: expected '{'");

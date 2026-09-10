@@ -752,10 +752,10 @@ function containerNameFromType(sem: SemanticContext, t: TypeNode): string | unde
   return undefined;
 }
 
-function renderContainerMembers(container: ContainerSym, title = "Available members"): string {
+function renderContainerMembers(sem: SemanticContext, container: ContainerSym, title = "Available members"): string {
   const lines: string[] = [`**${title}**`];
 
-  const fields = [...container.fields.values()]
+  const fields = sem.getContainerFields(container.name)
     .sort((a, b) => a.name.localeCompare(b.name));
   if (fields.length) {
     lines.push("", "**Fields**");
@@ -765,7 +765,7 @@ function renderContainerMembers(container: ContainerSym, title = "Available memb
     }
   }
 
-  const methods = [...container.methods.values()].flat();
+  const methods = [...sem.getContainerMethods(container.name).values()].flat();
   const instanceMethods = methods
     .filter(isInstanceMethod)
     .sort((a, b) => formatFunctionSignature(a).localeCompare(formatFunctionSignature(b)));
@@ -791,14 +791,14 @@ function renderContainerHover(sem: SemanticContext, container: ContainerSym): st
   const lines = [
     "```cpl",
     ...formatAnnotations(container.annotations),
-    `container ${container.name}`,
+    `container ${container.name}${container.baseName ? `::${container.baseName}` : ""}`,
     "```"
   ];
 
   const size = sem.sizeofType({ kind: "container", name: container.name });
   if (size != null) lines.push("", `**Size:** \`${size} bytes\``);
   if (container.doc?.trim()) lines.push("", container.doc);
-  lines.push("", renderContainerMembers(container));
+  lines.push("", renderContainerMembers(sem, container));
   return lines.join("\n");
 }
 
@@ -816,7 +816,7 @@ function renderContainerDetailsForType(sem: SemanticContext, type: TypeNode): st
 
   const size = sem.sizeofType({ kind: "container", name });
   if (size != null) lines.push(`**Size:** \`${size} bytes\``, "");
-  lines.push(renderContainerMembers(container, `Available on ${name}`));
+  lines.push(renderContainerMembers(sem, container, `Available on ${name}`));
   return lines.join("\n");
 }
 
@@ -864,7 +864,7 @@ function containerCompletionItems(sem: SemanticContext): CompletionItem[] {
     .map((container) => ({
       label: container.name,
       kind: CompletionItemKind.Struct,
-      detail: `container ${container.name}`,
+      detail: `container ${container.name}${container.baseName ? `::${container.baseName}` : ""}`,
       documentation: {
         kind: MarkupKind.Markdown,
         value: renderContainerHover(sem, container)
@@ -970,10 +970,10 @@ function generalCompletionItems(sem: SemanticContext): CompletionItem[] {
   ]);
 }
 
-function methodCompletionItems(container: ContainerSym, access: "::" | "."): CompletionItem[] {
+function methodCompletionItems(sem: SemanticContext, container: ContainerSym, access: "::" | "."): CompletionItem[] {
   const items: CompletionItem[] = [];
 
-  for (const [name, overloads] of container.methods) {
+  for (const [name, overloads] of sem.getContainerMethods(container.name)) {
     const associated = overloads.filter((fn) => !isInstanceMethod(fn));
     const instance = overloads.filter(isInstanceMethod);
     const visible = access === "::"
@@ -1013,8 +1013,8 @@ function methodCompletionItems(container: ContainerSym, access: "::" | "."): Com
   return items;
 }
 
-function fieldCompletionItems(container: ContainerSym): CompletionItem[] {
-  return [...container.fields.values()].map((field) => {
+function fieldCompletionItems(sem: SemanticContext, container: ContainerSym): CompletionItem[] {
+  return sem.getContainerFields(container.name).map((field) => {
     const declaration = annotatedVariableLines(field.name, field.type, field.annotations, !!field.readonly);
     return {
       label: field.name,
@@ -1239,13 +1239,13 @@ connection.onCompletion((params): CompletionItem[] => {
   const scopeMatch = prefix.match(/\b([A-Za-z_]\w*)::([A-Za-z_]\w*)?$/);
   if (scopeMatch) {
     const container = sem.containers.get(scopeMatch[1]);
-    return container ? methodCompletionItems(container, "::") : [];
+    return container ? methodCompletionItems(sem, container, "::") : [];
   }
 
   const dotMatch = prefix.match(/\b([A-Za-z_]\w*)\.([A-Za-z_]\w*)?$/);
   if (dotMatch) {
     const container = findVarContainerAtPosition(sem, dotMatch[1], params.position, docFsPath);
-    return container ? [...fieldCompletionItems(container), ...methodCompletionItems(container, ".")] : [];
+    return container ? [...fieldCompletionItems(sem, container), ...methodCompletionItems(sem, container, ".")] : [];
   }
 
   return generalCompletionItems(sem);
