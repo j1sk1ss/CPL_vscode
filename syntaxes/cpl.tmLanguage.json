@@ -178,7 +178,7 @@
       "patterns": [
         {
           "name": "keyword.declaration.function.cpl",
-          "match": "\\b(function|container)\\b"
+          "match": "\\b(function|container|interface)\\b"
         },
         {
           "name": "keyword.control.cpl",
@@ -246,6 +246,10 @@
           "match": "(?<=\\bcontainer\\s+)[A-Za-z_][A-Za-z0-9_]*"
         },
         {
+          "name": "entity.name.type.interface.cpl",
+          "match": "(?<=\\binterface\\s+)[A-Za-z_][A-Za-z0-9_]*"
+        },
+        {
           "name": "meta.function.definition.qualified.cpl",
           "match": "(?<=\\bfunction\\s+)([A-Za-z_][A-Za-z0-9_]*)(\\s*)(::)(\\s*)([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
@@ -281,7 +285,7 @@
         },
         {
           "name": "meta.function.call.generic.cpl",
-          "begin": "\\b(?!if\\b|while\\b|switch\\b|asm\\b|syscall\\b|start\\b|function\\b|container\\b|section\\b|align\\b)([A-Za-z_][A-Za-z0-9_]*)(\\s*)(<)(?=[^>\\r\\n]*>\\s*\\()",
+          "begin": "\\b(?!if\\b|while\\b|switch\\b|asm\\b|syscall\\b|start\\b|function\\b|container\\b|interface\\b|section\\b|align\\b)([A-Za-z_][A-Za-z0-9_]*)(\\s*)(<)(?=[^>\\r\\n]*>\\s*\\()",
           "beginCaptures": {
             "1": {
               "name": "entity.name.function.call.cpl"
@@ -311,7 +315,7 @@
         },
         {
           "name": "entity.name.function.call.cpl",
-          "match": "\\b(?!if\\b|while\\b|switch\\b|asm\\b|syscall\\b|start\\b|function\\b|container\\b|section\\b|align\\b)[A-Za-z_][A-Za-z0-9_]*\\b(?=\\s*(?:<[^>\\r\\n]*>\\s*)?\\()"
+          "match": "\\b(?!if\\b|while\\b|switch\\b|asm\\b|syscall\\b|start\\b|function\\b|container\\b|interface\\b|section\\b|align\\b)[A-Za-z_][A-Za-z0-9_]*\\b(?=\\s*(?:<[^>\\r\\n]*>\\s*)?\\()"
         }
       ]
     },

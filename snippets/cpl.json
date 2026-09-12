@@ -49,6 +49,17 @@
     ],
     "description": "Container method with self parameter"
   },
+  "interface-definition": {
+    "scope": "cpl",
+    "prefix": "interface",
+    "body": [
+      "interface ${1:name}${2:::base} {",
+      "\t@[self] @[abstract]",
+      "\tfunction ${3:method}(ptr ${1:name} self)${4: -> ${5:i0}};",
+      "}"
+    ],
+    "description": "Interface method contract"
+  },
   "container-field-access": {
     "scope": "cpl",
     "prefix": "field",
@@ -59,6 +70,12 @@
     "scope": "cpl",
     "prefix": "container",
     "body": "container",
+    "description": "CPL keyword"
+  },
+  "CPL Keywords Interface": {
+    "scope": "cpl",
+    "prefix": "interface",
+    "body": "interface",
     "description": "CPL keyword"
   },
   "import-op": {
@@ -262,6 +279,22 @@
       "@[register(${1:10})]"
     ],
     "description": "Register bindings for variables annotation"
+  },
+  "annotation-abstract": {
+    "scope": "cpl",
+    "prefix": "abstractann",
+    "body": [
+      "@[abstract]"
+    ],
+    "description": "Abstract method contract annotation"
+  },
+  "annotation-override": {
+    "scope": "cpl",
+    "prefix": "overrideann",
+    "body": [
+      "@[override]"
+    ],
+    "description": "Inherited interface method implementation annotation"
   },
   "annotation-stack": {
     "scope": "cpl",

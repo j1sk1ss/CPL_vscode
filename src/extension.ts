@@ -308,7 +308,7 @@ function implementationKey(containerName: string, methodName: string, params: st
 function extractContainerMethodPrototypes(text: string): ContainerMethodPrototype[] {
   const masked = maskCplCommentsAndStrings(text);
   const prototypes: ContainerMethodPrototype[] = [];
-  const containerPattern = /\bcontainer\s+([A-Za-z_]\w*)\s*\{/g;
+  const containerPattern = /\b(?:container|interface)\s+([A-Za-z_]\w*)(?:\s*::[^{]*)?\s*\{/g;
   let containerMatch: RegExpExecArray | null;
 
   while ((containerMatch = containerPattern.exec(masked)) !== null) {
@@ -607,7 +607,7 @@ export function activate(context: vscode.ExtensionContext) {
   updateVisibleInactiveBranches();
 
   const keywords = [
-    "start","exit","function","container","return",
+    "start","exit","function","container","interface","return",
     "if","else","while","loop","switch","case","default",
     "glob","ro","dref","ref","ptr","lis","break","extern","from","import","syscall","asm","as",
     "f64","f32","i64","i32","i16","i8","u64","u32","u16","u8","i0","str","arr","not","neg","poparg","sizeof","section","align"
@@ -745,6 +745,24 @@ Use \`sizeof(ContainerName)\` to inspect the computed size for the selected targ
 - Reordering fields can change the binary layout and break file, network or FFI compatibility.
 - A pointer to a container is only an address. It does not copy the object.
 - A container copied by value may copy padding and every field.`,
+
+    interface: `**interface** - declares a method contract implemented by containers.
+
+Interfaces describe behavior, not stored data. An interface can inherit one or more other interfaces, and a container can list multiple interfaces after \`::\`.
+
+\`\`\`cpl
+interface drawable {
+  @[self] @[abstract]
+  function draw(ptr drawable self) -> i0;
+}
+
+container sprite::drawable {
+  @[override]
+  function draw(ptr sprite self) -> i0;
+}
+\`\`\`
+
+Fields inside an interface are invalid; use a container for stored state.`,
 
     return: `**return** - finishes the current function and optionally supplies a result to its caller.
 

@@ -787,16 +787,24 @@ function renderContainerMembers(sem: SemanticContext, container: ContainerSym, t
   return lines.join("\n");
 }
 
+function formatContainerDeclaration(container: ContainerSym): string {
+  const keyword = container.isInterface ? "interface" : "container";
+  const baseNames = container.baseNames ?? (container.baseName ? [container.baseName] : []);
+  return `${keyword} ${container.name}${baseNames.length ? `::${baseNames.join(", ")}` : ""}`;
+}
+
 function renderContainerHover(sem: SemanticContext, container: ContainerSym): string {
   const lines = [
     "```cpl",
     ...formatAnnotations(container.annotations),
-    `container ${container.name}${container.baseName ? `::${container.baseName}` : ""}`,
+    formatContainerDeclaration(container),
     "```"
   ];
 
-  const size = sem.sizeofType({ kind: "container", name: container.name });
-  if (size != null) lines.push("", `**Size:** \`${size} bytes\``);
+  if (!container.isInterface) {
+    const size = sem.sizeofType({ kind: "container", name: container.name });
+    if (size != null) lines.push("", `**Size:** \`${size} bytes\``);
+  }
   if (container.doc?.trim()) lines.push("", container.doc);
   lines.push("", renderContainerMembers(sem, container));
   return lines.join("\n");
@@ -811,11 +819,13 @@ function renderContainerDetailsForType(sem: SemanticContext, type: TypeNode): st
 
   const lines: string[] = [];
   if (container.annotations?.length) {
-    lines.push("**Container annotations**", "", `\`${formatAnnotations(container.annotations).join(" ")}\``, "");
+    lines.push(`**${container.isInterface ? "Interface" : "Container"} annotations**`, "", `\`${formatAnnotations(container.annotations).join(" ")}\``, "");
   }
 
-  const size = sem.sizeofType({ kind: "container", name });
-  if (size != null) lines.push(`**Size:** \`${size} bytes\``, "");
+  if (!container.isInterface) {
+    const size = sem.sizeofType({ kind: "container", name });
+    if (size != null) lines.push(`**Size:** \`${size} bytes\``, "");
+  }
   lines.push(renderContainerMembers(sem, container, `Available on ${name}`));
   return lines.join("\n");
 }
@@ -838,7 +848,7 @@ const builtinTypeNames = [
 ];
 
 const cplKeywords = [
-  "function", "container", "glob", "extern", "ro",
+  "function", "container", "interface", "glob", "extern", "ro",
   "return", "if", "else", "loop", "while", "switch", "case", "default", "break", "exit",
   "sizeof", "poparg", "ref", "dref", "not", "neg", "as",
   "section", "align", "lis", "asm", "from", "import"
@@ -863,8 +873,8 @@ function containerCompletionItems(sem: SemanticContext): CompletionItem[] {
     .sort((a, b) => a.name.localeCompare(b.name))
     .map((container) => ({
       label: container.name,
-      kind: CompletionItemKind.Struct,
-      detail: `container ${container.name}${container.baseName ? `::${container.baseName}` : ""}`,
+      kind: container.isInterface ? CompletionItemKind.Interface : CompletionItemKind.Struct,
+      detail: formatContainerDeclaration(container),
       documentation: {
         kind: MarkupKind.Markdown,
         value: renderContainerHover(sem, container)
@@ -1097,6 +1107,18 @@ const annotationCompletions: AnnotationCompletion[] = [
     insertText: "self",
     detail: "@[self]",
     documentation: "Marks a container function as an explicit-self method for container call rewriting. The first parameter should be `ptr <container> self`."
+  },
+  {
+    label: "abstract",
+    insertText: "abstract",
+    detail: "@[abstract]",
+    documentation: "Marks a container or interface method as a contract that derived containers must implement."
+  },
+  {
+    label: "override",
+    insertText: "override",
+    detail: "@[override]",
+    documentation: "Marks a method implementation as satisfying an inherited interface contract."
   },
   {
     label: "abi",

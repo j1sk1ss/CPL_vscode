@@ -112,8 +112,11 @@ export type FuncOverloadSym = {
 export type ContainerSym = {
   kind: "container";
   name: string;
+  isInterface?: boolean;
   baseName?: string;
+  baseNames?: string[];
   baseRange?: Range;
+  baseRanges?: Range[];
   fields: Map<string, VarSym>;
   methods: Map<string, FuncOverloadSym[]>;
   range: Range;
@@ -531,6 +534,16 @@ function isOverrideMethod(fn: FuncOverloadSym): boolean {
   return hasAnnotation(fn.annotations, "override");
 }
 
+function containerBaseNames(container: ContainerSym): string[] {
+  return container.baseNames ?? (container.baseName ? [container.baseName] : []);
+}
+
+function mergeMethodOverload(target: FuncOverloadSym[], incoming: FuncOverloadSym) {
+  const index = target.findIndex((fn) => sameMethodContract(fn, incoming) || sameParamIdentity(fn.params, incoming.params));
+  if (index >= 0) target[index] = incoming;
+  else target.push(incoming);
+}
+
 function arityBounds(params: ParamSig[]): { minArgs: number; maxArgs: number } {
   const varIndex = params.findIndex((p) => p.isVarArgs);
   const fixed = varIndex >= 0 ? params.slice(0, varIndex) : params;
@@ -759,24 +772,52 @@ export class SemanticContext {
     name: string,
     range: Range,
     doc?: string,
-    opts?: { annotations?: string[]; baseName?: string; baseRange?: Range }
+    opts?: { annotations?: string[]; isInterface?: boolean; baseName?: string; baseRange?: Range; baseNames?: string[]; baseRanges?: Range[] }
   ) {
+    const kind = opts?.isInterface ? "Interface" : "Container";
     if (this.containers.has(name)) {
-      this.issues.push({ message: `Container '${name}' already declared`, range });
+      this.issues.push({ message: `${kind} '${name}' already declared`, range });
       return;
     }
 
-    if (opts?.baseName === name) {
-      this.issues.push({ message: `Container '${name}' cannot inherit from itself`, range: opts.baseRange ?? range });
-    } else if (opts?.baseName && !this.containers.has(opts.baseName)) {
-      this.issues.push({ message: `Unknown inheritance base '${opts.baseName}'`, range: opts.baseRange ?? range });
+    const baseNames = opts?.baseNames?.length ? [...opts.baseNames] : opts?.baseName ? [opts.baseName] : [];
+    const baseRanges = opts?.baseRanges?.length ? [...opts.baseRanges] : opts?.baseRange ? [opts.baseRange] : [];
+    const seenBases = new Set<string>();
+
+    for (let index = 0; index < baseNames.length; index++) {
+      const baseName = baseNames[index];
+      const baseRange = baseRanges[index] ?? range;
+
+      if (seenBases.has(baseName)) {
+        this.issues.push({ message: `${kind} '${name}' lists interface '${baseName}' more than once`, range: baseRange });
+        continue;
+      }
+      seenBases.add(baseName);
+
+      if (baseName === name) {
+        this.issues.push({ message: `${kind} '${name}' cannot inherit from itself`, range: baseRange });
+        continue;
+      }
+
+      const base = this.containers.get(baseName);
+      if (!base) {
+        this.issues.push({ message: `Unknown inheritance base '${baseName}'`, range: baseRange });
+        continue;
+      }
+
+      if (!base.isInterface) {
+        this.issues.push({ message: `${kind} '${name}' can inherit only interfaces; '${baseName}' is a container`, range: baseRange });
+      }
     }
 
     const sym: ContainerSym = {
       kind: "container",
       name,
-      baseName: opts?.baseName,
-      baseRange: opts?.baseRange,
+      isInterface: opts?.isInterface,
+      baseName: baseNames[0],
+      baseNames,
+      baseRange: baseRanges[0],
+      baseRanges,
       fields: new Map<string, VarSym>(),
       methods: new Map<string, FuncOverloadSym[]>(),
       range,
@@ -803,14 +844,16 @@ export class SemanticContext {
     if (!container || visiting.has(containerName)) return [];
 
     visiting.add(containerName);
-    const overloads = container.baseName
-      ? this.getContainerMethodOverloadsInternal(container.baseName, methodName, visiting)
-      : [];
+    const overloads: FuncOverloadSym[] = [];
+
+    for (const baseName of containerBaseNames(container)) {
+      for (const inherited of this.getContainerMethodOverloadsInternal(baseName, methodName, visiting)) {
+        mergeMethodOverload(overloads, inherited);
+      }
+    }
 
     for (const local of container.methods.get(methodName) ?? []) {
-      const index = overloads.findIndex((fn) => sameMethodContract(fn, local) || sameParamIdentity(fn.params, local.params));
-      if (index >= 0) overloads[index] = local;
-      else overloads.push(local);
+      mergeMethodOverload(overloads, local);
     }
 
     visiting.delete(containerName);
@@ -827,9 +870,11 @@ export class SemanticContext {
     if (!container || visiting.has(containerName)) return methods;
 
     visiting.add(containerName);
-    if (container.baseName) {
-      for (const [name, overloads] of this.getContainerMethods(container.baseName, visiting)) {
-        methods.set(name, [...overloads]);
+    for (const baseName of containerBaseNames(container)) {
+      for (const [name, overloads] of this.getContainerMethods(baseName, visiting)) {
+        const merged = methods.get(name) ?? [];
+        for (const overload of overloads) mergeMethodOverload(merged, overload);
+        methods.set(name, merged);
       }
     }
 
@@ -841,28 +886,32 @@ export class SemanticContext {
     return methods;
   }
 
+  private isAbstractContract(fn: FuncOverloadSym): boolean {
+    const owner = fn.containerName ? this.containers.get(fn.containerName) : undefined;
+    return isAbstractMethod(fn) || (!!owner?.isInterface && !fn.def);
+  }
+
   private inheritedAbstractContracts(container: ContainerSym, visiting = new Set<string>()): Map<string, FuncOverloadSym> {
     const required = new Map<string, FuncOverloadSym>();
-    if (!container.baseName || visiting.has(container.name)) return required;
+    if (visiting.has(container.name)) return required;
 
     visiting.add(container.name);
-    const base = this.containers.get(container.baseName);
-    if (!base) {
-      visiting.delete(container.name);
-      return required;
-    }
+    for (const baseName of containerBaseNames(container)) {
+      const base = this.containers.get(baseName);
+      if (!base) continue;
 
-    for (const [key, fn] of this.inheritedAbstractContracts(base, visiting)) {
-      required.set(key, fn);
-    }
+      for (const [key, fn] of this.inheritedAbstractContracts(base, visiting)) {
+        required.set(key, fn);
+      }
 
-    for (const overloads of base.methods.values()) {
-      for (const fn of overloads) {
-        const key = methodContractKey(fn);
-        if (isAbstractMethod(fn)) {
-          required.set(key, fn);
-        } else if (isOverrideMethod(fn) && fn.def) {
-          required.delete(key);
+      for (const overloads of base.methods.values()) {
+        for (const fn of overloads) {
+          const key = methodContractKey(fn);
+          if (this.isAbstractContract(fn)) {
+            required.set(key, fn);
+          } else if (isOverrideMethod(fn) && fn.def) {
+            required.delete(key);
+          }
         }
       }
     }
@@ -873,17 +922,17 @@ export class SemanticContext {
 
   private checkInheritedAbstractImplementations() {
     for (const container of this.containerDecls) {
-      if (!container.baseName) continue;
+      if (container.isInterface || !containerBaseNames(container).length) continue;
 
       const required = this.inheritedAbstractContracts(container);
       for (const [key, baseMethod] of required) {
         const local = [...container.methods.values()]
           .flat()
           .filter((fn) => methodContractKey(fn) === key);
-        const implemented = local.some((fn) => isOverrideMethod(fn) && !isAbstractMethod(fn) && !!fn.def);
+        const implemented = local.some((fn) => isOverrideMethod(fn) && !this.isAbstractContract(fn) && !!fn.def);
         if (implemented) continue;
 
-        const incompleteOverride = local.find((fn) => isOverrideMethod(fn) && !isAbstractMethod(fn) && !fn.def);
+        const incompleteOverride = local.find((fn) => isOverrideMethod(fn) && !this.isAbstractContract(fn) && !fn.def);
         const missingOverride = local.find((fn) => !isOverrideMethod(fn));
         this.issues.push({
           message: incompleteOverride
@@ -907,6 +956,11 @@ export class SemanticContext {
     const container = this.containers.get(containerName);
     if (!container) {
       this.issues.push({ message: `Unknown container '${containerName}'`, range });
+      return;
+    }
+
+    if (container.isInterface) {
+      this.issues.push({ message: `Interface '${containerName}' cannot declare fields`, range });
       return;
     }
 

@@ -203,7 +203,7 @@ type ParseIssue = {
 
 const KEYWORDS = new Set([
   // top-level / statements
-  "start","exit","function","container","return",
+  "start","exit","function","container","interface","return",
   "if","else","while","loop","switch","case","default",
   "glob","ro","dref","ref","ptr","lis","break","extern","from","import","syscall","asm","as",
   "f64","f32","i64","i32","i16","i8","u64","u32","u16","u8","i0","str","arr","not","neg","poparg","sizeof",
@@ -925,7 +925,15 @@ class Parser {
     if (this.match("kw", "container")) {
       const doc = this.pendingDoc;
       this.pendingDoc = undefined;
-      this.parseContainerAfterKeyword(doc);
+      this.parseContainerAfterKeyword(doc, false);
+      this.clearPendingMetadata();
+      return;
+    }
+
+    if (this.match("kw", "interface")) {
+      const doc = this.pendingDoc;
+      this.pendingDoc = undefined;
+      this.parseContainerAfterKeyword(doc, true);
       this.clearPendingMetadata();
       return;
     }
@@ -1511,29 +1519,40 @@ class Parser {
 
 
 
-  private parseContainerAfterKeyword(doc?: string) {
+  private parseContainerAfterKeyword(doc?: string, isInterface = false) {
+    const declKind = isInterface ? "interface" : "container";
     const annotations = this.takePendingAnnotations();
     const nameTok = this.cur();
-    this.expect("ident", undefined, "container: expected identifier");
+    this.expect("ident", undefined, `${declKind}: expected identifier`);
     const containerName = this.prev().text;
     const containerRange = rangeOf(this.lines, nameTok.start, nameTok.end);
-    let baseName: string | undefined;
-    let baseRange: Range | undefined;
+    const baseNames: string[] = [];
+    const baseRanges: Range[] = [];
 
     if (this.match("op", "::")) {
-      const baseTok = this.cur();
-      this.expect("ident", undefined, "container: expected inheritance base after '::'");
-      if (baseTok.kind === "ident") {
-        baseName = baseTok.text;
-        baseRange = rangeOf(this.lines, baseTok.start, baseTok.end);
-        this.sem?.useContainer(baseName, baseRange);
+      while (true) {
+        const baseTok = this.cur();
+        this.expect("ident", undefined, `${declKind}: expected interface name after '::'`);
+        if (baseTok.kind === "ident") {
+          const baseRange = rangeOf(this.lines, baseTok.start, baseTok.end);
+          baseNames.push(baseTok.text);
+          baseRanges.push(baseRange);
+          this.sem?.useContainer(baseTok.text, baseRange);
+        }
+
+        if (!this.match("punc", ",")) break;
       }
     }
 
-    this.sem?.declareContainer(containerName, containerRange, doc, { annotations, baseName, baseRange });
+    this.sem?.declareContainer(containerName, containerRange, doc, {
+      annotations,
+      isInterface,
+      baseNames,
+      baseRanges
+    });
     this.linkPendingDoc(containerName, containerRange, doc);
 
-    this.expect("punc", "{", "container: expected '{'");
+    this.expect("punc", "{", `${declKind}: expected '{'`);
     while (!this.at("eof") && !this.at("punc", "}")) {
       if (this.atRaw("comment")) {
         const tok = this.curRaw();
@@ -1585,14 +1604,14 @@ class Parser {
 
       const c = this.cur();
       this.issues.push({
-        message: "container: expected field or function",
+        message: `${declKind}: expected field or function`,
         range: rangeOf(this.lines, c.start, c.end)
       });
       this.syncToStatementEnd();
       this.clearPendingMetadata();
     }
 
-    this.expect("punc", "}", "container: expected '}'");
+    this.expect("punc", "}", `${declKind}: expected '}'`);
   }
 
   private parseContainerMethodAfterKeyword(
@@ -1892,7 +1911,15 @@ class Parser {
         if (this.match("kw", "container")) {
           const doc = this.pendingDoc;
           this.pendingDoc = undefined;
-          this.parseContainerAfterKeyword(doc);
+          this.parseContainerAfterKeyword(doc, false);
+          this.clearPendingMetadata();
+          continue;
+        }
+
+        if (this.match("kw", "interface")) {
+          const doc = this.pendingDoc;
+          this.pendingDoc = undefined;
+          this.parseContainerAfterKeyword(doc, true);
           this.clearPendingMetadata();
           continue;
         }
@@ -1914,7 +1941,7 @@ class Parser {
 
         const c = this.cur();
         this.issues.push({
-          message: "section: expected declaration/function/start/scope/align/preprocessor",
+          message: "section: expected declaration/function/interface/start/scope/align/preprocessor",
           range: rangeOf(this.lines, c.start, c.end)
         });
         this.syncToStatementEnd();
