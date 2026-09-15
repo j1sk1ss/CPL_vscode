@@ -929,18 +929,15 @@ export class SemanticContext {
         const local = [...container.methods.values()]
           .flat()
           .filter((fn) => methodContractKey(fn) === key);
-        const implemented = local.some((fn) => isOverrideMethod(fn) && !this.isAbstractContract(fn) && !!fn.def);
+        const implemented = local.some((fn) => isOverrideMethod(fn) && !this.isAbstractContract(fn));
         if (implemented) continue;
 
-        const incompleteOverride = local.find((fn) => isOverrideMethod(fn) && !this.isAbstractContract(fn) && !fn.def);
         const missingOverride = local.find((fn) => !isOverrideMethod(fn));
         this.issues.push({
-          message: incompleteOverride
-            ? `Method '${container.name}.${baseMethod.name}' overrides inherited abstract method '${baseMethod.containerName}.${baseMethod.name}' but has no implementation`
-            : missingOverride
+          message: missingOverride
             ? `Method '${container.name}.${baseMethod.name}' implements inherited abstract method '${baseMethod.containerName}.${baseMethod.name}' but is missing @[override]`
             : `Container '${container.name}' must implement inherited abstract method '${baseMethod.containerName}.${baseMethod.name}' with @[override]`,
-          range: incompleteOverride?.primaryRange ?? missingOverride?.primaryRange ?? container.range
+          range: missingOverride?.primaryRange ?? container.range
         });
       }
     }

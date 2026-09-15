@@ -494,6 +494,24 @@ function bssAnnotationInsertLine(text: string, declarationLine: number): number 
   return line;
 }
 
+function textRangeIsSimpleCastSubject(text: string): boolean {
+  const trimmed = text.trim();
+  return (
+    /^[A-Za-z_]\w*(?:\s*(?:\.[A-Za-z_]\w*|\[[^\]\r\n]*\]))*$/.test(trimmed) ||
+    /^-?(?:0x[0-9a-fA-F]+|\d+)$/.test(trimmed) ||
+    /^'.*'$/.test(trimmed)
+  );
+}
+
+function castQuickFixEdit(doc: TextDocument, range: Range, castType: string): TextEdit {
+  const subject = doc.getText(range);
+  if (textRangeIsSimpleCastSubject(subject)) {
+    return TextEdit.insert(range.end, ` as ${castType}`);
+  }
+
+  return TextEdit.replace(range, `(${subject}) as ${castType}`);
+}
+
 connection.onCodeAction((params): CodeAction[] => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return [];
@@ -538,7 +556,7 @@ connection.onCodeAction((params): CodeAction[] => {
         edit: {
           changes: {
             [params.textDocument.uri]: [
-              TextEdit.insert(diagnostic.range.end, ` as ${castType}`)
+              castQuickFixEdit(doc, diagnostic.range, castType)
             ]
           }
         }

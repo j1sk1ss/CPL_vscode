@@ -217,10 +217,18 @@ async function runModuleTest(resource?: vscode.Uri): Promise<void> {
 type ContainerMethodPrototype = {
   containerName: string;
   methodName: string;
+  annotations: string[];
   modifiers: string[];
   params: string;
   returnType: string;
   key: string;
+};
+
+type ContainerDeclarationInfo = {
+  name: string;
+  isInterface: boolean;
+  baseNames: string[];
+  methods: ContainerMethodPrototype[];
 };
 
 function maskCplCommentsAndStrings(text: string): string {
@@ -305,14 +313,19 @@ function implementationKey(containerName: string, methodName: string, params: st
   return `${containerName}::${methodName}(${normalizeSignaturePart(params)})`;
 }
 
-function extractContainerMethodPrototypes(text: string): ContainerMethodPrototype[] {
+function extractContainerDeclarations(text: string): ContainerDeclarationInfo[] {
   const masked = maskCplCommentsAndStrings(text);
-  const prototypes: ContainerMethodPrototype[] = [];
-  const containerPattern = /\b(?:container|interface)\s+([A-Za-z_]\w*)(?:\s*::[^{]*)?\s*\{/g;
+  const declarations: ContainerDeclarationInfo[] = [];
+  const containerPattern = /\b(container|interface)\s+([A-Za-z_]\w*)(?:\s*::\s*([^{]+?))?\s*\{/g;
   let containerMatch: RegExpExecArray | null;
 
   while ((containerMatch = containerPattern.exec(masked)) !== null) {
-    const containerName = containerMatch[1];
+    const isInterface = containerMatch[1] === "interface";
+    const containerName = containerMatch[2];
+    const baseNames = (containerMatch[3] ?? "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter((item) => /^[A-Za-z_]\w*$/.test(item));
     const openOffset = masked.indexOf("{", containerMatch.index);
     if (openOffset < 0) continue;
 
@@ -320,21 +333,23 @@ function extractContainerMethodPrototypes(text: string): ContainerMethodPrototyp
     if (closeOffset < 0) continue;
 
     const body = masked.slice(openOffset + 1, closeOffset);
-    const methodPattern = /\b((?:(?:glob|ro|extern)\s+)*)function\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*->\s*([^;{}]+);/g;
+    const methods: ContainerMethodPrototype[] = [];
+    const methodPattern = /((?:@\[[^\]]+\]\s*)*)\b((?:(?:glob|ro|extern)\s+)*)function\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(?:->\s*([^;{}]+))?;/g;
     let methodMatch: RegExpExecArray | null;
 
     while ((methodMatch = methodPattern.exec(body)) !== null) {
-      const rawModifiers = methodMatch[1].trim().split(/\s+/).filter(Boolean);
+      const rawModifiers = methodMatch[2].trim().split(/\s+/).filter(Boolean);
       if (rawModifiers.includes("extern")) continue;
 
-      const methodName = methodMatch[2];
+      const methodName = methodMatch[3];
       const modifiers = rawModifiers.filter((modifier) => modifier !== "extern");
-      const params = normalizeSignaturePart(methodMatch[3]);
-      const returnType = normalizeSignaturePart(methodMatch[4]);
+      const params = normalizeSignaturePart(methodMatch[4]);
+      const returnType = normalizeSignaturePart(methodMatch[5] ?? "i0");
 
-      prototypes.push({
+      methods.push({
         containerName,
         methodName,
+        annotations: [],
         modifiers,
         params,
         returnType,
@@ -342,16 +357,59 @@ function extractContainerMethodPrototypes(text: string): ContainerMethodPrototyp
       });
     }
 
+    declarations.push({ name: containerName, isInterface, baseNames, methods });
     containerPattern.lastIndex = closeOffset + 1;
   }
 
-  return prototypes;
+  return declarations;
+}
+
+function rewriteInterfaceSelfParam(params: string, containerName: string): string {
+  return params.replace(/^ptr\s+[A-Za-z_]\w*\s+self\b/, `ptr ${containerName} self`);
+}
+
+function interfaceContractImplementations(
+  declarations: ContainerDeclarationInfo[],
+  containerName: string
+): ContainerMethodPrototype[] {
+  const byName = new Map<string, ContainerDeclarationInfo>();
+  for (const declaration of declarations) byName.set(declaration.name, declaration);
+
+  const container = byName.get(containerName);
+  if (!container || container.isInterface) return [];
+
+  const out: ContainerMethodPrototype[] = [];
+  const visit = (interfaceName: string, seen: Set<string>) => {
+    if (seen.has(interfaceName)) return;
+    seen.add(interfaceName);
+
+    const iface = byName.get(interfaceName);
+    if (!iface?.isInterface) return;
+
+    for (const baseName of iface.baseNames) visit(baseName, seen);
+
+    for (const method of iface.methods) {
+      const params = rewriteInterfaceSelfParam(method.params, containerName);
+      out.push({
+        containerName,
+        methodName: method.methodName,
+        annotations: ["override"],
+        modifiers: method.modifiers,
+        params,
+        returnType: method.returnType,
+        key: implementationKey(containerName, method.methodName, params)
+      });
+    }
+  };
+
+  for (const baseName of container.baseNames) visit(baseName, new Set<string>());
+  return out;
 }
 
 function extractImplementedMethodKeys(text: string): Set<string> {
   const masked = maskCplCommentsAndStrings(text);
   const keys = new Set<string>();
-  const methodPattern = /\b(?:(?:glob|ro)\s+)*function\s+([A-Za-z_]\w*)::([A-Za-z_]\w*)\s*\(([^)]*)\)\s*->\s*([^{;]+)\{/g;
+  const methodPattern = /\b(?:(?:glob|ro)\s+)*function\s+([A-Za-z_]\w*)::([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(?:->\s*([^{;]+))?\{/g;
   let match: RegExpExecArray | null;
 
   while ((match = methodPattern.exec(masked)) !== null) {
@@ -391,7 +449,7 @@ function findHeaderCandidatesForDocument(document: vscode.TextDocument): Map<str
 
   while ((includeMatch = includePattern.exec(document.getText())) !== null) {
     const includePath = path.resolve(dir, includeMatch[1]);
-    if (includePath.endsWith(".cpl")) addHeaderCandidate(candidates, includePath);
+    if (includePath.endsWith(".cpl") || includePath.endsWith(".inc")) addHeaderCandidate(candidates, includePath);
   }
 
   if (baseName.endsWith("_h.cpl")) {
@@ -399,9 +457,21 @@ function findHeaderCandidatesForDocument(document: vscode.TextDocument): Map<str
     return candidates;
   }
 
+  if (baseName.endsWith(".inc")) {
+    candidates.set(filePath, document.getText());
+    return candidates;
+  }
+
   if (baseName.endsWith(".cpl")) {
     const stem = baseName.slice(0, -".cpl".length);
     addHeaderCandidate(candidates, path.join(dir, `${stem}_h.cpl`));
+    try {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.isFile() && entry.name.endsWith(".inc")) {
+          addHeaderCandidate(candidates, path.join(dir, entry.name));
+        }
+      }
+    } catch {}
   }
 
   return candidates;
@@ -413,21 +483,36 @@ function findMissingImplementations(
 ): ContainerMethodPrototype[] {
   const existingKeys = extractImplementedMethodKeys(document.getText());
   const prototypesByKey = new Map<string, ContainerMethodPrototype>();
+  const declarations: ContainerDeclarationInfo[] = [];
 
   for (const headerText of findHeaderCandidatesForDocument(document).values()) {
-    for (const prototype of extractContainerMethodPrototypes(headerText)) {
+    declarations.push(...extractContainerDeclarations(headerText));
+  }
+
+  for (const declaration of declarations) {
+    if (declaration.name !== containerName || declaration.isInterface) continue;
+    for (const prototype of declaration.methods) {
       if (prototype.containerName !== containerName) continue;
       if (existingKeys.has(prototype.key)) continue;
       if (!prototypesByKey.has(prototype.key)) prototypesByKey.set(prototype.key, prototype);
     }
   }
 
+  for (const prototype of interfaceContractImplementations(declarations, containerName)) {
+    if (existingKeys.has(prototype.key)) continue;
+    if (!prototypesByKey.has(prototype.key)) prototypesByKey.set(prototype.key, prototype);
+  }
+
   return [...prototypesByKey.values()];
 }
 
 function buildMethodImplementation(prototype: ContainerMethodPrototype): string {
+  const annotations = prototype.annotations
+    .filter((annotation) => annotation === "override")
+    .map((annotation) => `@[${annotation}]`);
   const modifierPrefix = prototype.modifiers.length ? `${prototype.modifiers.join(" ")} ` : "";
-  return `${modifierPrefix}function ${prototype.containerName}::${prototype.methodName}(${prototype.params}) -> ${prototype.returnType} {\n}`;
+  const signature = `${modifierPrefix}function ${prototype.containerName}::${prototype.methodName}(${prototype.params}) -> ${prototype.returnType} {\n}`;
+  return annotations.length ? `${annotations.join(" ")}\n${signature}}` : `${signature}}`;
 }
 
 function buildMethodImplementations(prototypes: ContainerMethodPrototype[]): string {
