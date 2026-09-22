@@ -229,6 +229,8 @@ type ContainerDeclarationInfo = {
   isInterface: boolean;
   baseNames: string[];
   methods: ContainerMethodPrototype[];
+  openOffset?: number;
+  closeOffset?: number;
 };
 
 function maskCplCommentsAndStrings(text: string): string {
@@ -316,7 +318,7 @@ function implementationKey(containerName: string, methodName: string, params: st
 function extractContainerDeclarations(text: string): ContainerDeclarationInfo[] {
   const masked = maskCplCommentsAndStrings(text);
   const declarations: ContainerDeclarationInfo[] = [];
-  const containerPattern = /\b(container|interface)\s+([A-Za-z_]\w*)(?:\s*::\s*([^{]+?))?\s*\{/g;
+  const containerPattern = /\b(container|interface)\s+([A-Za-z_]\w*)(?:\s*(?:::|implements)\s*([^{]+?))?\s*\{/g;
   let containerMatch: RegExpExecArray | null;
 
   while ((containerMatch = containerPattern.exec(masked)) !== null) {
@@ -357,7 +359,7 @@ function extractContainerDeclarations(text: string): ContainerDeclarationInfo[] 
       });
     }
 
-    declarations.push({ name: containerName, isInterface, baseNames, methods });
+    declarations.push({ name: containerName, isInterface, baseNames, methods, openOffset, closeOffset });
     containerPattern.lastIndex = closeOffset + 1;
   }
 
@@ -444,6 +446,8 @@ function findHeaderCandidatesForDocument(document: vscode.TextDocument): Map<str
   const filePath = document.uri.fsPath;
   const dir = path.dirname(filePath);
   const baseName = path.basename(filePath);
+  candidates.set(filePath, document.getText());
+
   const includePattern = /^[ \t]*#[ \t]*include[ \t]+"([^"]+)"/gm;
   let includeMatch: RegExpExecArray | null;
 
@@ -453,12 +457,10 @@ function findHeaderCandidatesForDocument(document: vscode.TextDocument): Map<str
   }
 
   if (baseName.endsWith("_h.cpl")) {
-    candidates.set(filePath, document.getText());
     return candidates;
   }
 
   if (baseName.endsWith(".inc")) {
-    candidates.set(filePath, document.getText());
     return candidates;
   }
 
@@ -517,6 +519,23 @@ function buildMethodImplementation(prototype: ContainerMethodPrototype): string 
 
 function buildMethodImplementations(prototypes: ContainerMethodPrototype[]): string {
   return prototypes.map(buildMethodImplementation).join("\n\n");
+}
+
+function buildContainerMethodPrototype(prototype: ContainerMethodPrototype, indent: string): string {
+  const annotations = prototype.annotations
+    .filter((annotation) => annotation === "override")
+    .map((annotation) => `${indent}@[${annotation}]`);
+  const modifierPrefix = prototype.modifiers.length ? `${prototype.modifiers.join(" ")} ` : "";
+  const signature = `${indent}${modifierPrefix}function ${prototype.methodName}(${prototype.params}) -> ${prototype.returnType};`;
+  return annotations.length ? `${annotations.join("\n")}\n${signature}` : signature;
+}
+
+function buildContainerMethodPrototypes(
+  prototypes: ContainerMethodPrototype[],
+  indent: string,
+  newline: string
+): string {
+  return prototypes.map((prototype) => buildContainerMethodPrototype(prototype, indent)).join(`${newline}${newline}`);
 }
 
 function implementationCompletionRange(
@@ -583,6 +602,122 @@ function createImplementationCompletionProvider(): vscode.Disposable {
       }
     },
     ":"
+  );
+}
+
+function missingImplementationContainerName(diagnostic: vscode.Diagnostic): string | undefined {
+  const message = diagnostic.message;
+  return message.match(/^Container '([A-Za-z_]\w*)' must implement inherited abstract method /)?.[1];
+}
+
+function declarationsForDocument(document: vscode.TextDocument): ContainerDeclarationInfo[] {
+  const declarations: ContainerDeclarationInfo[] = [];
+  for (const headerText of findHeaderCandidatesForDocument(document).values()) {
+    declarations.push(...extractContainerDeclarations(headerText));
+  }
+  return declarations;
+}
+
+function findCurrentContainerDeclaration(
+  document: vscode.TextDocument,
+  containerName: string
+): ContainerDeclarationInfo | undefined {
+  return extractContainerDeclarations(document.getText()).find(
+    (declaration) => declaration.name === containerName && !declaration.isInterface
+  );
+}
+
+function findMissingContainerPrototypes(
+  document: vscode.TextDocument,
+  containerName: string
+): ContainerMethodPrototype[] {
+  const declarations = declarationsForDocument(document);
+  const container = declarations.find((declaration) => declaration.name === containerName && !declaration.isInterface);
+  if (!container) return [];
+
+  const existingPrototypeKeys = new Set(container.methods.map((method) => method.key));
+  const prototypesByKey = new Map<string, ContainerMethodPrototype>();
+
+  for (const prototype of interfaceContractImplementations(declarations, containerName)) {
+    if (existingPrototypeKeys.has(prototype.key)) continue;
+    if (!prototypesByKey.has(prototype.key)) prototypesByKey.set(prototype.key, prototype);
+  }
+
+  return [...prototypesByKey.values()];
+}
+
+function containerPrototypeInsertPosition(document: vscode.TextDocument, container: ContainerDeclarationInfo): vscode.Position | undefined {
+  if (container.closeOffset == null) return undefined;
+  return document.positionAt(container.closeOffset);
+}
+
+function containerPrototypeInsertText(
+  document: vscode.TextDocument,
+  container: ContainerDeclarationInfo,
+  prototypes: ContainerMethodPrototype[]
+): string {
+  const text = document.getText();
+  const newline = preferredNewline(text);
+  const insertPosition = containerPrototypeInsertPosition(document, container);
+  const closeLine = insertPosition ? document.lineAt(insertPosition.line) : undefined;
+  const baseIndent = closeLine?.text.match(/^[ \t]*/)?.[0] ?? "";
+  const memberIndent = `${baseIndent}\t`;
+  const body = buildContainerMethodPrototypes(prototypes, memberIndent, newline);
+  const insertOffset = insertPosition ? document.offsetAt(insertPosition) : 0;
+  const lineStart = insertPosition ? document.offsetAt(new vscode.Position(insertPosition.line, 0)) : insertOffset;
+  const beforeClose = text.slice(0, insertOffset);
+  const beforeCloseOnLine = text.slice(lineStart, insertOffset);
+  const needsLeadingBlankLine =
+    beforeCloseOnLine.trim().length > 0 || !beforeClose.trimEnd().endsWith("{")
+      ? newline
+      : "";
+
+  return `${needsLeadingBlankLine}${body}${newline}${baseIndent}`;
+}
+
+function createImplementationCodeActionProvider(): vscode.Disposable {
+  return vscode.languages.registerCodeActionsProvider(
+    { language: "cpl", scheme: "file" },
+    {
+      provideCodeActions(document, _range, context) {
+        const actions: vscode.CodeAction[] = [];
+        const seenContainers = new Set<string>();
+
+        for (const diagnostic of context.diagnostics) {
+          const containerName = missingImplementationContainerName(diagnostic);
+          if (!containerName || seenContainers.has(containerName)) continue;
+          seenContainers.add(containerName);
+
+          const container = findCurrentContainerDeclaration(document, containerName);
+          if (!container) continue;
+
+          const insertPosition = containerPrototypeInsertPosition(document, container);
+          if (!insertPosition) continue;
+
+          const missing = findMissingContainerPrototypes(document, containerName);
+          if (missing.length === 0) continue;
+
+          const title = missing.length === 1
+            ? `Declare missing ${containerName} override`
+            : `Declare ${missing.length} missing ${containerName} overrides`;
+          const action = new vscode.CodeAction(title, vscode.CodeActionKind.QuickFix);
+          action.diagnostics = [diagnostic];
+          action.isPreferred = true;
+          action.edit = new vscode.WorkspaceEdit();
+          action.edit.insert(
+            document.uri,
+            insertPosition,
+            containerPrototypeInsertText(document, container, missing)
+          );
+          actions.push(action);
+        }
+
+        return actions;
+      }
+    },
+    {
+      providedCodeActionKinds: [vscode.CodeActionKind.QuickFix]
+    }
   );
 }
 
@@ -680,6 +815,7 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     inactiveBranchDecoration,
     createImplementationCompletionProvider(),
+    createImplementationCodeActionProvider(),
     vscode.commands.registerCommand("cpl.runModuleTest", runModuleTest),
     vscode.window.onDidChangeActiveTextEditor((editor) => updateInactiveBranches(editor)),
     vscode.window.onDidChangeVisibleTextEditors(() => updateVisibleInactiveBranches()),
@@ -692,10 +828,10 @@ export function activate(context: vscode.ExtensionContext) {
   updateVisibleInactiveBranches();
 
   const keywords = [
-    "start","exit","function","container","interface","return",
+    "start","exit","function","container","interface","implements","return",
     "if","else","while","loop","switch","case","default",
     "glob","ro","dref","ref","ptr","lis","break","extern","from","import","syscall","asm","as",
-    "f64","f32","i64","i32","i16","i8","u64","u32","u16","u8","i0","str","arr","not","neg","poparg","sizeof","section","align"
+    "f64","f32","i64","i32","i16","i8","u64","u32","u16","u8","i0","str","arr","not","neg","poparg","sizeof","place","section","align"
   ];
 
   const integerTypeDoc = (name: string, bits: number, signed: boolean) => {
@@ -833,7 +969,7 @@ Use \`sizeof(ContainerName)\` to inspect the computed size for the selected targ
 
     interface: `**interface** - declares a method contract implemented by containers.
 
-Interfaces describe behavior, not stored data. An interface can inherit one or more other interfaces, and a container can list multiple interfaces after \`::\`.
+Interfaces describe behavior, not stored data. An interface can inherit one or more other interfaces, and a container can list multiple interfaces after \`implements\`.
 
 \`\`\`cpl
 interface drawable {
@@ -841,13 +977,29 @@ interface drawable {
   function draw(ptr drawable self) -> i0;
 }
 
-container sprite::drawable {
+container sprite implements drawable {
   @[override]
   function draw(ptr sprite self) -> i0;
 }
 \`\`\`
 
 Fields inside an interface are invalid; use a container for stored state.`,
+
+    implements: `**implements** - connects a container or interface to interface contracts.
+
+\`\`\`cpl
+interface readable {
+  @[self] @[abstract]
+  function read(ptr readable self) -> i32;
+}
+
+container file_reader implements readable {
+  @[override]
+  function read(ptr file_reader self) -> i32;
+}
+\`\`\`
+
+A container that implements an interface must provide matching \`@[override]\` methods. Implementing an interface enables virtual dispatch through pointers to that interface.`,
 
     return: `**return** - finishes the current function and optionally supplies a result to its caller.
 
@@ -1329,6 +1481,17 @@ u64 packet_size = sizeof(packet);
 **Important distinction**
 
 \`sizeof(ptr packet)\` is the size of one address. \`sizeof(packet)\` is the size of the complete object. \`sizeof(str)\` describes the string value representation, not the number of characters in the pointed string.`,
+
+    place: `**place** - creates a container object in existing storage.
+
+\`\`\`cpl
+@[align(8)] arr storage[64, u8];
+ptr impl item = place(ref storage, impl);
+\`\`\`
+
+The first argument is the destination address. The second argument is the concrete container type to place there. This is useful for factories, arenas and interface dispatch because the placed object can be used through an implemented interface pointer.
+
+Make sure the storage is large enough for \`sizeof(Container)\` and aligned for the target layout. Virtual containers include vtable storage in their computed size.`,
 
     // Primitive and aggregate types
     f64: floatTypeDoc("f64", 64),

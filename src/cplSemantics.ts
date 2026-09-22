@@ -249,6 +249,20 @@ function parseAnnotationInt(
   return undefined;
 }
 
+function containerHasVTableStorage(container: ContainerSym): boolean {
+  const baseNames = container.baseNames ?? (container.baseName ? [container.baseName] : []);
+  if (baseNames.length > 0) return true;
+  if (hasAnnotation(container.annotations, "vtable")) return true;
+
+  for (const overloads of container.methods.values()) {
+    for (const fn of overloads) {
+      if (hasAnnotation(fn.annotations, "abstract") || hasAnnotation(fn.annotations, "override")) return true;
+    }
+  }
+
+  return false;
+}
+
 function layoutOfType(
   t: TypeNode,
   opts: SizeofOptions,
@@ -299,6 +313,8 @@ function layoutOfType(
         const defaultAlignment = Math.max(1, explicitContainerAlignment ?? pointerSize);
         const likeC = hasAnnotation(container.annotations, "like_c");
         const isUnion = hasAnnotation(container.annotations, "union");
+        const hasVTable = containerHasVTableStorage(container);
+        const vtableAlignment = Math.max(1, likeC ? pointerSize : defaultAlignment);
         const fields = [...container.fields.values()];
 
         const fieldLayouts: { field: VarSym; layout: TypeLayout; alignment: number }[] = [];
@@ -315,14 +331,15 @@ function layoutOfType(
           const baseAlignment = likeC ? (explicitContainerAlignment ?? 1) : defaultAlignment;
           const alignment = fieldLayouts.reduce(
             (max, item) => Math.max(max, item.alignment),
-            Math.max(1, baseAlignment)
+            Math.max(1, baseAlignment, hasVTable ? vtableAlignment : 1)
           );
-          return { size: alignUp(largest, alignment), alignment };
+          const vtableSize = hasVTable ? pointerSize : 0;
+          return { size: alignUp(vtableSize + largest, alignment), alignment };
         }
 
-        let offset = 0;
+        let offset = hasVTable ? pointerSize : 0;
         let containerAlignment = likeC
-          ? Math.max(1, explicitContainerAlignment ?? 1)
+          ? Math.max(1, explicitContainerAlignment ?? 1, hasVTable ? vtableAlignment : 1)
           : defaultAlignment;
         for (const item of fieldLayouts) {
           offset = alignUp(offset, item.alignment);

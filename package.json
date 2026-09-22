@@ -1,16 +1,16 @@
 {
   "name": "cpl-lang-simple",
-  "displayName": "CPL - VSCode language support and simple analysis",
+  "displayName": "CPL - VSCode language support and simple static analysis",
   "description": "VS Code extention for CPL",
   "icon": "./cpl.png",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "publisher": "j1sk1ss",
   "engines": {
     "vscode": "^1.80.0"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/j1sk1ss/CordellCompiler.PETPRJ.git"
+    "url": "https://github.com/j1sk1ss/CordellCompiler.git"
   },
   "categories": [
     "Programming Languages"
@@ -29,7 +29,7 @@
           "CPL", "cpl"
         ],
         "extensions": [
-          ".cpl"
+          ".cpl", ".cplh"
         ],
         "configuration": "./language-configuration.json",
         "icon": {

@@ -203,11 +203,11 @@ type ParseIssue = {
 
 const KEYWORDS = new Set([
   // top-level / statements
-  "start","exit","function","container","interface","return",
+  "start","exit","function","container","interface","implements","return",
   "if","else","while","loop","switch","case","default",
   "glob","ro","dref","ref","ptr","lis","break","extern","from","import","syscall","asm","as",
   "f64","f32","i64","i32","i16","i8","u64","u32","u16","u8","i0","str","arr","not","neg","poparg","sizeof",
-  "section","align","fn"
+  "section","align","place","fn"
 ]);
 
 const TYPE_KW = new Set([
@@ -1529,10 +1529,10 @@ class Parser {
     const baseNames: string[] = [];
     const baseRanges: Range[] = [];
 
-    if (this.match("op", "::")) {
+    if (this.match("kw", "implements") || this.match("op", "::")) {
       while (true) {
         const baseTok = this.cur();
-        this.expect("ident", undefined, `${declKind}: expected interface name after '::'`);
+        this.expect("ident", undefined, `${declKind}: expected interface name after implements`);
         if (baseTok.kind === "ident") {
           const baseRange = rangeOf(this.lines, baseTok.start, baseTok.end);
           baseNames.push(baseTok.text);
@@ -2742,6 +2742,33 @@ class Parser {
     if (this.match("kw", "poparg")) {
       const tok = this.prev();
       return { type: { kind: "unknown" }, start: tok.start, end: tok.end };
+    }
+
+    if (this.match("kw", "place")) {
+      const kwTok = this.prev();
+      let targetType: TypeNode = { kind: "unknown" };
+
+      this.expect("punc", "(", "place: expected '('");
+      if (!this.at("punc", ")")) {
+        this.parseExpression();
+        if (this.match("punc", ",")) {
+          targetType = this.parseType();
+        } else {
+          this.issues.push({
+            message: "place: expected ', <container-type>'",
+            range: rangeOf(this.lines, kwTok.start, kwTok.end)
+          });
+        }
+
+        while (this.match("punc", ",")) this.parseExpression();
+      }
+      this.expect("punc", ")", "place: expected ')'");
+
+      return {
+        type: { kind: "ptr", to: targetType },
+        start: kwTok.start,
+        end: this.prev().end
+      };
     }
 
     if (this.match("kw", "sizeof")) {

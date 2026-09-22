@@ -34,6 +34,7 @@ import {
   FuncOverloadSym,
   ContainerSym,
   formatAnnotations,
+  hasAnnotation,
   TypeNode,
   UNINITIALIZED_GLOBAL_STORAGE_CODE,
   IMPLICIT_INTEGER_CAST_CODE
@@ -805,10 +806,40 @@ function renderContainerMembers(sem: SemanticContext, container: ContainerSym, t
   return lines.join("\n");
 }
 
+function virtualMethodItems(sem: SemanticContext, container: ContainerSym): FuncOverloadSym[] {
+  return [...sem.getContainerMethods(container.name).values()]
+    .flat()
+    .filter((fn) => {
+      const owner = fn.containerName ? sem.containers.get(fn.containerName) : undefined;
+      return !!owner?.isInterface
+        || hasAnnotation(fn.annotations, "abstract")
+        || hasAnnotation(fn.annotations, "override");
+    })
+    .sort((a, b) => formatFunctionSignature(a).localeCompare(formatFunctionSignature(b)));
+}
+
+function renderVirtualMethods(sem: SemanticContext, container: ContainerSym): string | undefined {
+  const methods = virtualMethodItems(sem, container);
+  const hasExplicitVTable = hasAnnotation(container.annotations, "vtable");
+  const hasImplementedInterfaces = !!(container.baseNames?.length || container.baseName);
+
+  if (!methods.length && !hasExplicitVTable && !hasImplementedInterfaces) return undefined;
+
+  const lines = ["**VTable**"];
+  if (!methods.length) {
+    lines.push("", "_Enabled; no virtual method contracts found._");
+    return lines.join("\n");
+  }
+
+  lines.push("");
+  for (const fn of methods) lines.push(`- \`${annotatedFunctionInline(fn)}\``);
+  return lines.join("\n");
+}
+
 function formatContainerDeclaration(container: ContainerSym): string {
   const keyword = container.isInterface ? "interface" : "container";
   const baseNames = container.baseNames ?? (container.baseName ? [container.baseName] : []);
-  return `${keyword} ${container.name}${baseNames.length ? `::${baseNames.join(", ")}` : ""}`;
+  return `${keyword} ${container.name}${baseNames.length ? ` implements ${baseNames.join(", ")}` : ""}`;
 }
 
 function renderContainerHover(sem: SemanticContext, container: ContainerSym): string {
@@ -824,6 +855,8 @@ function renderContainerHover(sem: SemanticContext, container: ContainerSym): st
     if (size != null) lines.push("", `**Size:** \`${size} bytes\``);
   }
   if (container.doc?.trim()) lines.push("", container.doc);
+  const virtualMethods = renderVirtualMethods(sem, container);
+  if (virtualMethods) lines.push("", virtualMethods);
   lines.push("", renderContainerMembers(sem, container));
   return lines.join("\n");
 }
@@ -844,6 +877,8 @@ function renderContainerDetailsForType(sem: SemanticContext, type: TypeNode): st
     const size = sem.sizeofType({ kind: "container", name });
     if (size != null) lines.push(`**Size:** \`${size} bytes\``, "");
   }
+  const virtualMethods = renderVirtualMethods(sem, container);
+  if (virtualMethods) lines.push(virtualMethods, "");
   lines.push(renderContainerMembers(sem, container, `Available on ${name}`));
   return lines.join("\n");
 }
@@ -866,9 +901,9 @@ const builtinTypeNames = [
 ];
 
 const cplKeywords = [
-  "function", "container", "interface", "glob", "extern", "ro",
+  "function", "container", "interface", "implements", "glob", "extern", "ro",
   "return", "if", "else", "loop", "while", "switch", "case", "default", "break", "exit",
-  "sizeof", "poparg", "ref", "dref", "not", "neg", "as",
+  "sizeof", "place", "poparg", "ref", "dref", "not", "neg", "as",
   "section", "align", "lis", "asm", "from", "import"
 ];
 
@@ -899,6 +934,23 @@ function containerCompletionItems(sem: SemanticContext): CompletionItem[] {
       },
       insertText: container.name,
       sortText: `0_container_${container.name}`
+    }));
+}
+
+function interfaceCompletionItems(sem: SemanticContext): CompletionItem[] {
+  return [...sem.containers.values()]
+    .filter((container) => container.isInterface)
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((container) => ({
+      label: container.name,
+      kind: CompletionItemKind.Interface,
+      detail: formatContainerDeclaration(container),
+      documentation: {
+        kind: MarkupKind.Markdown,
+        value: renderContainerHover(sem, container)
+      },
+      insertText: container.name,
+      sortText: `0_interface_${container.name}`
     }));
 }
 
@@ -1275,6 +1327,10 @@ connection.onCompletion((params): CompletionItem[] => {
 
   const annotationItems = annotationCompletionItems(prefix, params.position);
   if (annotationItems.length) return annotationItems;
+
+  if (/\b(?:container|interface)\s+[A-Za-z_]\w*\s+implements\s+(?:[A-Za-z_]\w*\s*,\s*)*(?:[A-Za-z_]\w*)?$/.test(prefix)) {
+    return interfaceCompletionItems(sem);
+  }
 
   const scopeMatch = prefix.match(/\b([A-Za-z_]\w*)::([A-Za-z_]\w*)?$/);
   if (scopeMatch) {

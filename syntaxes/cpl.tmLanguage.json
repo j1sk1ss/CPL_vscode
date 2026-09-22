@@ -177,8 +177,32 @@
     "keywords": {
       "patterns": [
         {
+          "name": "meta.implements.cpl",
+          "begin": "\\b(implements)\\b",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.declaration.implements.cpl"
+            }
+          },
+          "end": "(?=\\s*\\{)|(?=\\s*(?:\\r?\\n|$))",
+          "patterns": [
+            {
+              "name": "punctuation.separator.implements.cpl",
+              "match": ","
+            },
+            {
+              "name": "entity.name.type.interface.cpp",
+              "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+            }
+          ]
+        },
+        {
           "name": "keyword.declaration.function.cpl",
           "match": "\\b(function|container|interface)\\b"
+        },
+        {
+          "name": "keyword.declaration.implements.cpl",
+          "match": "\\bimplements\\b"
         },
         {
           "name": "keyword.control.cpl",
@@ -201,6 +225,36 @@
           "match": "\\b(syscall|asm|lis|poparg)\\b"
         },
         {
+          "name": "meta.place.cpl",
+          "begin": "\\b(place)(\\s*\\()",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.operator.new.cpl"
+            }
+          },
+          "end": "\\)",
+          "patterns": [
+            {
+              "name": "meta.place.container-type.cpl",
+              "match": "(,\\s*)([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*\\))",
+              "captures": {
+                "2": {
+                  "name": "entity.name.type.struct.c"
+                }
+              }
+            },
+            {
+              "include": "#keywords"
+            },
+            {
+              "include": "#types"
+            },
+            {
+              "include": "#variables"
+            }
+          ]
+        },
+        {
           "name": "keyword.other.operatorlike.cpl",
           "match": "\\b(as|ref|dref|not|neg)\\b"
         }
@@ -217,15 +271,45 @@
           "match": "\\b(str|arr|ptr|fn)\\b"
         },
         {
-          "name": "storage.type.user.cpl",
+          "name": "entity.name.type.struct.c",
           "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b(?=\\s+[A-Za-z_][A-Za-z0-9_]*\\s*(?:=|;|,|\\)|\\[))"
+        },
+        {
+          "name": "meta.pointer.container-type.cpl",
+          "match": "\\b(ptr)(\\s+)([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s+[A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.other.cpl"
+            },
+            "3": {
+              "name": "entity.name.type.struct.c"
+            }
+          }
+        },
+        {
+          "name": "meta.array.element-type.cpl",
+          "match": "(,\\s*)(f64|f32|i64|i32|i16|i8|u64|u32|u16|u8|i0)\\b(?=\\s*\\])",
+          "captures": {
+            "2": {
+              "name": "storage.type.primitive.cpl"
+            }
+          }
+        },
+        {
+          "name": "meta.array.element-type.cpl",
+          "match": "(,\\s*)(str)\\b(?=\\s*\\])",
+          "captures": {
+            "2": {
+              "name": "storage.type.other.cpl"
+            }
+          }
         },
         {
           "name": "meta.array.element-type.cpl",
           "match": "(,\\s*)([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*\\])",
           "captures": {
             "2": {
-              "name": "storage.type.user.cpl"
+              "name": "entity.name.type.struct.c"
             }
           }
         }
@@ -242,11 +326,11 @@
     "functions": {
       "patterns": [
         {
-          "name": "entity.name.type.container.cpl",
+          "name": "entity.name.type.struct.c",
           "match": "(?<=\\bcontainer\\s+)[A-Za-z_][A-Za-z0-9_]*"
         },
         {
-          "name": "entity.name.type.interface.cpl",
+          "name": "entity.name.type.interface.cpp",
           "match": "(?<=\\binterface\\s+)[A-Za-z_][A-Za-z0-9_]*"
         },
         {
@@ -254,7 +338,7 @@
           "match": "(?<=\\bfunction\\s+)([A-Za-z_][A-Za-z0-9_]*)(\\s*)(::)(\\s*)([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": {
-              "name": "storage.type.user.cpl"
+              "name": "entity.name.type.struct.c"
             },
             "3": {
               "name": "keyword.operator.scope.cpl"
@@ -273,7 +357,7 @@
           "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(\\s*)(::)(\\s*)([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*(?:<[^>\\r\\n]*>\\s*)?\\()",
           "captures": {
             "1": {
-              "name": "storage.type.user.cpl"
+              "name": "entity.name.type.struct.c"
             },
             "3": {
               "name": "keyword.operator.scope.cpl"
@@ -285,7 +369,7 @@
         },
         {
           "name": "meta.function.call.generic.cpl",
-          "begin": "\\b(?!if\\b|while\\b|switch\\b|asm\\b|syscall\\b|start\\b|function\\b|container\\b|interface\\b|section\\b|align\\b)([A-Za-z_][A-Za-z0-9_]*)(\\s*)(<)(?=[^>\\r\\n]*>\\s*\\()",
+          "begin": "\\b(?!if\\b|while\\b|switch\\b|asm\\b|syscall\\b|start\\b|function\\b|container\\b|interface\\b|implements\\b|section\\b|align\\b|place\\b)([A-Za-z_][A-Za-z0-9_]*)(\\s*)(<)(?=[^>\\r\\n]*>\\s*\\()",
           "beginCaptures": {
             "1": {
               "name": "entity.name.function.call.cpl"
@@ -315,7 +399,7 @@
         },
         {
           "name": "entity.name.function.call.cpl",
-          "match": "\\b(?!if\\b|while\\b|switch\\b|asm\\b|syscall\\b|start\\b|function\\b|container\\b|interface\\b|section\\b|align\\b)[A-Za-z_][A-Za-z0-9_]*\\b(?=\\s*(?:<[^>\\r\\n]*>\\s*)?\\()"
+          "match": "\\b(?!if\\b|while\\b|switch\\b|asm\\b|syscall\\b|start\\b|function\\b|container\\b|interface\\b|implements\\b|section\\b|align\\b|place\\b)[A-Za-z_][A-Za-z0-9_]*\\b(?=\\s*(?:<[^>\\r\\n]*>\\s*)?\\()"
         }
       ]
     },
@@ -410,7 +494,7 @@
               "name": "keyword.declaration.function.cpl"
             },
             "2": {
-              "name": "storage.type.user.cpl"
+              "name": "entity.name.type.struct.c"
             },
             "4": {
               "name": "keyword.operator.scope.cpl"

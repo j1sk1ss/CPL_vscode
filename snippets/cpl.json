@@ -39,6 +39,19 @@
     ],
     "description": "Struct-like container with fields and methods"
   },
+  "container-implements-interface": {
+    "scope": "cpl",
+    "prefix": "cimpl",
+    "body": [
+      "container ${1:name} implements ${2:interface} {",
+      "\t${3:u32 field = 0;}",
+      "",
+      "\t@[override]",
+      "\tfunction ${4:method}(ptr ${1:name} self)${5: -> ${6:i0}};",
+      "}"
+    ],
+    "description": "Container implementing an interface"
+  },
   "container-method": {
     "scope": "cpl",
     "prefix": "cmethod",
@@ -53,9 +66,9 @@
     "scope": "cpl",
     "prefix": "interface",
     "body": [
-      "interface ${1:name}${2:::base} {",
+      "interface ${1:name}${2: implements ${3:base}} {",
       "\t@[self] @[abstract]",
-      "\tfunction ${3:method}(ptr ${1:name} self)${4: -> ${5:i0}};",
+      "\tfunction ${4:method}(ptr ${1:name} self)${5: -> ${6:i0}};",
       "}"
     ],
     "description": "Interface method contract"
@@ -76,6 +89,12 @@
     "scope": "cpl",
     "prefix": "interface",
     "body": "interface",
+    "description": "CPL keyword"
+  },
+  "CPL Keywords Implements": {
+    "scope": "cpl",
+    "prefix": "implements",
+    "body": "implements",
     "description": "CPL keyword"
   },
   "import-op": {
@@ -157,6 +176,14 @@
       "sizeof(${1:i32})"
     ],
     "description": "CPL sizeof expression"
+  },
+  "CPL Ops PLACE": {
+    "scope": "cpl",
+    "prefix": "place",
+    "body": [
+      "place(${1:address}, ${2:container})"
+    ],
+    "description": "Construct a container instance in existing storage"
   },
   "CPL Types void": {
     "scope": "cpl",
@@ -295,6 +322,14 @@
       "@[override]"
     ],
     "description": "Inherited interface method implementation annotation"
+  },
+  "annotation-vtable": {
+    "scope": "cpl",
+    "prefix": "vtableann",
+    "body": [
+      "@[vtable]"
+    ],
+    "description": "Enable vtable storage for a container"
   },
   "annotation-stack": {
     "scope": "cpl",

@@ -15,7 +15,9 @@
     {
       "scope": [
         "keyword.declaration.cpl",
-        "keyword.declaration.function.cpl"
+        "keyword.declaration.function.cpl",
+        "keyword.declaration.implements.cpl",
+        "keyword.operator.new.cpl"
       ],
       "settings": {
         "foreground": "#FF00FF"
@@ -45,10 +47,16 @@
         "storage.type",
         "storage.type.user.cpl",
         "entity.name.type.container.cpl",
+        "entity.name.type.interface.cpl",
+        "entity.name.type.struct.c",
+        "entity.name.type.interface.cpp",
+        "entity.name.type.container.implementation.cpl",
+        "entity.name.type.container.reference.cpl",
+        "meta.implements.cpl entity.name.type.interface.cpl",
         "meta.array.element-type.cpl storage.type.user.cpl"
       ],
       "settings": {
-        "foreground": "#4fbf4f"
+        "foreground": "#4EC9B0"
       }
     },
     {
@@ -57,7 +65,7 @@
         "entity.name.type.parameter.cpl"
       ],
       "settings": {
-        "foreground": "#4fbf4f"
+        "foreground": "#4EC9B0"
       }
     },
     {
