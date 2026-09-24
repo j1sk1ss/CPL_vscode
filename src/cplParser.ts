@@ -204,7 +204,7 @@ type ParseIssue = {
 const KEYWORDS = new Set([
   // top-level / statements
   "start","exit","function","container","interface","implements","return",
-  "if","else","while","loop","switch","case","default",
+  "defer","if","else","while","loop","switch","case","default",
   "glob","ro","dref","ref","ptr","lis","break","extern","from","import","syscall","asm","as",
   "f64","f32","i64","i32","i16","i8","u64","u32","u16","u8","i0","str","arr","not","neg","poparg","sizeof",
   "section","align","place","fn"
@@ -2070,6 +2070,13 @@ class Parser {
       }
 
       this.expect("punc", "}", "switch: expected '}'");
+      return;
+    }
+
+    if (this.at("kw", "defer")) {
+      this.i++;
+      this.parseExpression();
+      this.expect("punc", ";");
       return;
     }
 

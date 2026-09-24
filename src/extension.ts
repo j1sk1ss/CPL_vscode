@@ -829,7 +829,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   const keywords = [
     "start","exit","function","container","interface","implements","return",
-    "if","else","while","loop","switch","case","default",
+    "defer","if","else","while","loop","switch","case","default",
     "glob","ro","dref","ref","ptr","lis","break","extern","from","import","syscall","asm","as",
     "f64","f32","i64","i32","i16","i8","u64","u32","u16","u8","i0","str","arr","not","neg","poparg","sizeof","place","section","align"
   ];

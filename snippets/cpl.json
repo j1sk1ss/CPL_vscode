@@ -191,6 +191,13 @@
     "body": "i0",
     "description": "CPL i0 type"
   },
+  "defer-call": {
+    "scope": "cpl",
+    "prefix": "defer",
+    "body": "defer ${1:cleanup}(${0});",
+    "description": "Deferred function call"
+  },
+
   "CPL Keywords Section": {
     "scope": "cpl",
     "prefix": "section",
