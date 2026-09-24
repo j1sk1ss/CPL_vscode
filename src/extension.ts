@@ -1019,6 +1019,24 @@ The result is placed according to the target calling convention, often in a regi
 
 A returned pointer must remain valid after the function ends. Pointers to local variables generally do not.`,
 
+    defer: `**defer** - schedules a function call to run before the current function leaves.
+
+Syntax: \`defer <function-call>;\`
+
+\`\`\`cpl
+function close_file(ptr i0 file) -> i0;
+
+function read_header(ptr i0 file) -> i32 {
+  defer close_file(file);
+  if file == 0; { return -1; }
+  return 0;
+}
+\`\`\`
+
+Use \`defer\` for local cleanup paths such as releasing memory, closing handles or restoring temporary state. The deferred expression must be a function call.
+
+A deferred call belongs to the current function. It should run before normal \`return\` paths and before explicit \`exit\` statements emitted from that function. Keep deferred calls small and avoid hiding important control flow inside them.`,
+
     // Control flow
     if: `**if** - executes a block only when its condition is non-zero.
 
