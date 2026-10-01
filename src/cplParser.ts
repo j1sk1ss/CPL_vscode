@@ -1122,9 +1122,14 @@ class Parser {
 
         while (!this.atRaw("eof") && !this.atRaw("eol") && !this.atRaw("punc", ";")) {
           const tok = this.curRaw();
+          this.i++;
+
+          // Comments are trivia for a preprocessor definition and must not
+          // become part of the macro value.
+          if (tok.kind === "comment") continue;
+
           valueParts.push(tok.text);
           valueEnd = tok.end;
-          this.i++;
         }
 
         this.sem?.defineMacro(
@@ -1393,6 +1398,10 @@ class Parser {
   }
 
   private parseSwitchCaseBody() {
+    // Comments between a case label and its body are switch trivia, not the
+    // body statement itself.
+    this.skipInnerComments();
+
     if (this.at("punc", "{")) {
       this.parseBlock();
       return;
@@ -2058,15 +2067,18 @@ class Parser {
       this.expect("punc", ";", "switch: expected ';' after expression");
       this.expect("punc", "{", "switch: expected '{'");
 
+      this.skipInnerComments();
       while (this.match("kw", "case")) {
         this.parseLiteral();
         this.expect("punc", ";", "case: expected ';'");
         this.parseSwitchCaseBody();
+        this.skipInnerComments();
       }
 
       if (this.match("kw", "default")) {
         this.match("punc", ";");
         this.parseSwitchCaseBody();
+        this.skipInnerComments();
       }
 
       this.expect("punc", "}", "switch: expected '}'");
