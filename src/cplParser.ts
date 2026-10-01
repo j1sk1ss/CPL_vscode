@@ -2423,7 +2423,7 @@ class Parser {
     if (this.at("ident")) {
       const tok = this.cur();
       const macro = this.sem?.macros.get(tok.text);
-      if (macro && macro.value.kind !== "raw") {
+      if (macro) {
         this.sem?.useMacro(tok.text, rangeOf(this.lines, tok.start, tok.end));
         this.i++;
         return;
