@@ -26,7 +26,7 @@ import * as path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 
 import { TextDocument } from "vscode-languageserver-textdocument";
-import { analyze } from "./cplParser";
+import { analyze, lex } from "./cplParser";
 import {
   SemanticContext,
   formatType,
@@ -54,7 +54,7 @@ const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
 const semByUri = new Map<string, SemanticContext>();
 let workspaceRoots: string[] = [];
 
-const semanticTokenTypes = ["macro"];
+const semanticTokenTypes = ["macro", "number"];
 const semanticTokenModifiers = ["declaration"];
 
 connection.onInitialize((params: InitializeParams): InitializeResult => {
@@ -499,7 +499,7 @@ function textRangeIsSimpleCastSubject(text: string): boolean {
   const trimmed = text.trim();
   return (
     /^[A-Za-z_]\w*(?:\s*(?:\.[A-Za-z_]\w*|\[[^\]\r\n]*\]))*$/.test(trimmed) ||
-    /^-?(?:0x[0-9a-fA-F]+|\d+)$/.test(trimmed) ||
+    /^-?(?:0x[0-9a-fA-F]+|0b[01]+|\d+)(?:i8|i16|i32|i64|u8|u16|u32|u64)?$/.test(trimmed) ||
     /^'.*'$/.test(trimmed)
   );
 }
@@ -997,10 +997,10 @@ function globalVariableCompletionItems(sem: SemanticContext): CompletionItem[] {
     });
 }
 
-function macroValueString(value: { kind: string; value?: unknown; text?: string }): string {
+function macroValueString(value: { kind: string; value?: unknown; text?: string; raw?: string }): string {
   if (value.kind === "string") return JSON.stringify(value.value);
   if (value.kind === "char") return quoteCplChar(String(value.value ?? ""));
-  if (value.kind === "number") return String(value.value);
+  if (value.kind === "number") return value.raw ?? String(value.value);
   return value.text ?? "";
 }
 
@@ -1404,7 +1404,7 @@ sizeof(${formatType(sz.targetType)}) = ${computed}
       const v =
         ms.value.kind === "string" ? JSON.stringify(ms.value.value) :
         ms.value.kind === "char" ? quoteCplChar(ms.value.value) :
-        ms.value.kind === "number" ? String(ms.value.value) :
+        ms.value.kind === "number" ? (ms.value.raw ?? String(ms.value.value)) :
         ms.value.text;
 
       const value = `\`\`\`cpl\n#define ${ms.name} ${v}\n\`\`\`` + (ms.doc?.trim() ? `\n\n${ms.doc}` : "");
@@ -1611,25 +1611,36 @@ connection.languages.semanticTokens.on((params) => {
   if (!sem || !doc) return builder.build();
 
   const docFsPath = uriToFsPath(params.textDocument.uri);
-  const tokens: { line: number; char: number; len: number; modifier: number }[] = [];
+  const tokens: { line: number; char: number; len: number; type: number; modifier: number }[] = [];
   const seen = new Set<string>();
 
-  const addToken = (range: { start: Position; end: Position }, modifier = 0) => {
+  const addToken = (range: { start: Position; end: Position }, type = 0, modifier = 0) => {
     const len = rangeLen(range);
     if (len <= 0) return;
 
-    const key = `${range.start.line}:${range.start.character}:${len}`;
+    const key = `${range.start.line}:${range.start.character}:${len}:${type}`;
     if (seen.has(key)) return;
     seen.add(key);
-    tokens.push({ line: range.start.line, char: range.start.character, len, modifier });
+    tokens.push({ line: range.start.line, char: range.start.character, len, type, modifier });
   };
 
   for (const macro of sem.macroDecls) {
-    if (belongsToFile(macro.filePath, docFsPath)) addToken(macro.range, 1);
+    if (belongsToFile(macro.filePath, docFsPath)) addToken(macro.range, 0, 1);
   }
 
   for (const use of sem.macroUses) {
-    if (belongsToFile(use.filePath, docFsPath)) addToken(use.range);
+    if (belongsToFile(use.filePath, docFsPath)) addToken(use.range, 0);
+  }
+
+  for (const token of lex(doc.getText())) {
+    if (token.kind !== "int" && token.kind !== "float") continue;
+    addToken(
+      {
+        start: doc.positionAt(token.start),
+        end: doc.positionAt(token.end)
+      },
+      1
+    );
   }
 
   const macroNames = new Set(sem.macroDecls.map((m) => m.name));
@@ -1663,7 +1674,7 @@ connection.languages.semanticTokens.on((params) => {
   }
 
   tokens.sort((a, b) => a.line - b.line || a.char - b.char);
-  for (const t of tokens) builder.push(t.line, t.char, t.len, 0, t.modifier);
+  for (const t of tokens) builder.push(t.line, t.char, t.len, t.type, t.modifier);
   return builder.build();
 });
 

@@ -53,8 +53,17 @@ function parseMacroValue(raw: string): MacroValue {
   if (t.length >= 2 && t.startsWith("'") && t.endsWith("'")) {
     return { kind: "char", value: unescapeCStyle(t.slice(1, -1)) };
   }
-  if (/^-?0x[0-9a-fA-F]+$/.test(t)) return { kind: "number", value: Number.parseInt(t, 16) };
-  if (/^-?\d+$/.test(t)) return { kind: "number", value: Number.parseInt(t, 10) };
+  const integer = splitIntegerLiteral(t);
+  if (integer) {
+    const sign = integer.numeric.startsWith("-") ? -1 : 1;
+    const unsigned = integer.numeric.replace(/^-/, "");
+    const value = unsigned.startsWith("0x") || unsigned.startsWith("0X")
+      ? Number.parseInt(unsigned.slice(2), 16) * sign
+      : unsigned.startsWith("0b") || unsigned.startsWith("0B")
+        ? Number.parseInt(unsigned.slice(2), 2) * sign
+        : Number.parseInt(unsigned, 10) * sign;
+    return { kind: "number", value, raw: t };
+  }
 
   return { kind: "raw", text: t };
 }
@@ -142,7 +151,7 @@ function collectDefines(
   }
 }
 
-type TokenKind =
+export type TokenKind =
   | "eof"
   | "eol"
   | "ident"
@@ -155,7 +164,7 @@ type TokenKind =
   | "op"
   | "punc";
 
-type Token = {
+export type Token = {
   kind: TokenKind;
   text: string;
   start: number;
@@ -185,6 +194,7 @@ type ExprInfo = {
   requiresExplicitRefForPtr?: boolean;
   isStringLiteral?: boolean;
   intLiteralValue?: bigint;
+  hasExplicitIntegerType?: boolean;
   associatedContainerName?: string;
   associatedMethodName?: string;
   instanceContainerName?: string;
@@ -288,14 +298,32 @@ function rangeOf(lines: number[], start: number, end: number): Range {
   return Range.create(offsetToPos(lines, start), offsetToPos(lines, end));
 }
 
+type IntegerLiteralSuffix = "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64";
+
+const INTEGER_LITERAL_SUFFIX_RE = /(i8|i16|i32|i64|u8|u16|u32|u64)$/;
+
+function splitIntegerLiteral(s: string): { numeric: string; suffix?: IntegerLiteralSuffix } | undefined {
+  const suffixMatch = s.match(INTEGER_LITERAL_SUFFIX_RE);
+  const suffix = suffixMatch?.[1] as IntegerLiteralSuffix | undefined;
+  const numeric = suffix ? s.slice(0, -suffix.length) : s;
+  if (!/^-?(?:0[xX][0-9a-fA-F]+|0[bB][01]+|\d+)$/.test(numeric)) return undefined;
+  return { numeric, suffix };
+}
+
 function parseIntLiteral(s: string): number {
-  if (s.startsWith("0x") || s.startsWith("0X")) return parseInt(s.slice(2), 16);
-  if (s.startsWith("0b") || s.startsWith("0B")) return parseInt(s.slice(2), 2);
-  return parseInt(s, 10);
+  const literal = splitIntegerLiteral(s);
+  const numeric = literal?.numeric ?? s;
+  const sign = numeric.startsWith("-") ? -1 : 1;
+  const unsigned = numeric.replace(/^-/, "");
+  if (unsigned.startsWith("0x") || unsigned.startsWith("0X")) return sign * parseInt(unsigned.slice(2), 16);
+  if (unsigned.startsWith("0b") || unsigned.startsWith("0B")) return sign * parseInt(unsigned.slice(2), 2);
+  return sign * parseInt(unsigned, 10);
 }
 
 function parseIntLiteralBigInt(s: string): bigint | undefined {
-  const normalized = s.replace(/^0X/, "0x").replace(/^0B/, "0b");
+  const literal = splitIntegerLiteral(s);
+  if (!literal) return undefined;
+  const normalized = literal.numeric.replace(/^0X/, "0x").replace(/^0B/, "0b");
   try {
     return BigInt(normalized);
   } catch {
@@ -311,7 +339,7 @@ function integerLiteralType(value: bigint): TypeNode {
   return { kind: "prim", name: "u64" };
 }
 
-function lex(text: string): Token[] {
+export function lex(text: string): Token[] {
   const tokens: Token[] = [];
   let i = 0;
 
@@ -429,6 +457,14 @@ function lex(text: string): Token[] {
           } else {
             i = expStart;
           }
+        }
+      }
+
+      if (kind === "int") {
+        const suffix = /^(?:i8|i16|i32|i64|u8|u16|u32|u64)/.exec(text.slice(i))?.[0];
+        if (suffix) {
+          const next = text[i + suffix.length] ?? "";
+          if (!isAlnum_(next)) i += suffix.length;
         }
       }
 
@@ -2605,10 +2641,13 @@ class Parser {
         ? undefined
         : opTok.text === "-" ? -inner.intLiteralValue : inner.intLiteralValue;
       return {
-        type: intLiteralValue == null ? inner.type : integerLiteralType(intLiteralValue),
+        type: intLiteralValue == null
+          ? inner.type
+          : inner.hasExplicitIntegerType ? inner.type : integerLiteralType(intLiteralValue),
         start: opTok.start,
         end: inner.end ?? opTok.end,
-        intLiteralValue
+        intLiteralValue,
+        hasExplicitIntegerType: inner.hasExplicitIntegerType
       };
     }
     return this.parsePostfix();
@@ -2850,12 +2889,17 @@ class Parser {
 
     if (this.at("int")) {
       const tok = this.cur(); this.i++;
+      const literal = splitIntegerLiteral(tok.text);
       const intLiteralValue = parseIntLiteralBigInt(tok.text);
+      const explicitType = literal?.suffix;
       return {
-        type: intLiteralValue == null ? { kind: "prim", name: "i64" } : integerLiteralType(intLiteralValue),
+        type: explicitType
+          ? { kind: "prim", name: explicitType }
+          : intLiteralValue == null ? { kind: "prim", name: "i64" } : integerLiteralType(intLiteralValue),
         start: tok.start,
         end: tok.end,
-        intLiteralValue
+        intLiteralValue,
+        hasExplicitIntegerType: explicitType != null
       };
     }
 
@@ -2891,6 +2935,8 @@ class Parser {
         explicitRef: inner.explicitRef,
         requiresExplicitRefForPtr: inner.requiresExplicitRefForPtr,
         isStringLiteral: inner.isStringLiteral,
+        intLiteralValue: inner.intLiteralValue,
+        hasExplicitIntegerType: inner.hasExplicitIntegerType,
         start: lpar.start,
         end: rpar.end
       };

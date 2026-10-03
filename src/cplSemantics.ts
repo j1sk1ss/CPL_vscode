@@ -3,7 +3,7 @@ import { Range } from "vscode-languageserver/node";
 export type MacroValue =
   | { kind: "string"; value: string }
   | { kind: "char"; value: string }
-  | { kind: "number"; value: number }
+  | { kind: "number"; value: number; raw?: string }
   | { kind: "raw"; text: string };
 
 export type MacroCondition = {
@@ -243,9 +243,10 @@ function parseAnnotationInt(
 ): number | undefined {
   const argument = annotationArgument(annotations, name);
   if (argument == null) return undefined;
-  if (/^0x[0-9a-f]+$/i.test(argument)) return Number.parseInt(argument.slice(2), 16);
-  if (/^0b[01]+$/i.test(argument)) return Number.parseInt(argument.slice(2), 2);
-  if (/^\d+$/.test(argument)) return Number.parseInt(argument, 10);
+  const numeric = argument.replace(/(?:i8|i16|i32|i64|u8|u16|u32|u64)$/, "");
+  if (/^0x[0-9a-f]+$/i.test(numeric)) return Number.parseInt(numeric.slice(2), 16);
+  if (/^0b[01]+$/i.test(numeric)) return Number.parseInt(numeric.slice(2), 2);
+  if (/^\d+$/.test(numeric)) return Number.parseInt(numeric, 10);
   return undefined;
 }
 
@@ -689,9 +690,10 @@ export class SemanticContext {
   ): number | undefined => {
     const argument = annotationArgument(annotations, name);
     if (argument == null) return undefined;
-    if (/^0x[0-9a-f]+$/i.test(argument)) return Number.parseInt(argument.slice(2), 16);
-    if (/^0b[01]+$/i.test(argument)) return Number.parseInt(argument.slice(2), 2);
-    if (/^\d+$/.test(argument)) return Number.parseInt(argument, 10);
+    const numeric = argument.replace(/(?:i8|i16|i32|i64|u8|u16|u32|u64)$/, "");
+    if (/^0x[0-9a-f]+$/i.test(numeric)) return Number.parseInt(numeric.slice(2), 16);
+    if (/^0b[01]+$/i.test(numeric)) return Number.parseInt(numeric.slice(2), 2);
+    if (/^\d+$/.test(numeric)) return Number.parseInt(numeric, 10);
 
     const macro = this.macros.get(argument);
     return macro?.value.kind === "number" ? macro.value.value : undefined;

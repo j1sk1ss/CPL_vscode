@@ -1587,33 +1587,35 @@ An array owns storage for all elements. A pointer stores only an address. Passin
       provideHover(document, position) {
         const range = document.getWordRangeAtPosition(
           position,
-          /0x[0-9a-fA-F]+|0b[01]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|'[^']'|[A-Za-z_][A-Za-z0-9_]*/ 
+          /0x[0-9a-fA-F]+(?:i8|i16|i32|i64|u8|u16|u32|u64)?|0b[01]+(?:i8|i16|i32|i64|u8|u16|u32|u64)?|\d+(?:i8|i16|i32|i64|u8|u16|u32|u64)|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|'[^']'|[A-Za-z_][A-Za-z0-9_]*/ 
         );
         if (!range) return;
         const word = document.getText(range);        
 
-        if (/^(0x[0-9a-fA-F]+|0b[01]+|0[0-7]*|[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?|'.')$/.test(word)) {
+        if (/^(0x[0-9a-fA-F]+(?:i8|i16|i32|i64|u8|u16|u32|u64)?|0b[01]+(?:i8|i16|i32|i64|u8|u16|u32|u64)?|[0-9]+(?:i8|i16|i32|i64|u8|u16|u32|u64)|0[0-7]*|[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?|'.')$/.test(word)) {
           let value: number;
           let type: string;
+          const suffix = word.match(/(i8|i16|i32|i64|u8|u16|u32|u64)$/)?.[1];
+          const numericWord = suffix ? word.slice(0, -suffix.length) : word;
 
           if (word.startsWith("'") && word.endsWith("'")) {
             value = word.charCodeAt(1);
             type = "u8";
           } 
-          else if (word.startsWith("0x") || word.startsWith("0X")) {
-            value = parseInt(word, 16);
+          else if (numericWord.startsWith("0x") || numericWord.startsWith("0X")) {
+            value = parseInt(numericWord, 16);
             type = value > 0xFFFFFFFF ? "u64" : value > 0xFFFF ? "u32" : value > 0xFF ? "u16" : "u8";
           } 
-          else if (word.startsWith("0b") || word.startsWith("0B")) {
-            value = parseInt(word.slice(2), 2);
+          else if (numericWord.startsWith("0b") || numericWord.startsWith("0B")) {
+            value = parseInt(numericWord.slice(2), 2);
             type = value > 0xFFFFFFFF ? "u64" : value > 0xFFFF ? "u32" : value > 0xFF ? "u16" : "u8";
           } 
-          else if (word.startsWith("0") && word.length > 1 && !word.includes(".")) {
-            value = parseInt(word, 8);
+          else if (numericWord.startsWith("0") && numericWord.length > 1 && !numericWord.includes(".") && !suffix) {
+            value = parseInt(numericWord, 8);
             type = value > 0xFFFFFFFF ? "u64" : value > 0xFFFF ? "u32" : value > 0xFF ? "u16" : "u8";
           } 
-          else if (word.includes(".") || /[eE]/.test(word)) {
-            const f = parseFloat(word);
+          else if (numericWord.includes(".") || /[eE]/.test(numericWord)) {
+            const f = parseFloat(numericWord);
             type = "f64";
             const buffer = new ArrayBuffer(8);
             new DataView(buffer).setFloat64(0, f, false);
@@ -1623,9 +1625,11 @@ An array owns storage for all elements. A pointer stores only an address. Passin
             value = Number(bits);
           } 
           else {
-            value = parseInt(word, 10);
+            value = parseInt(numericWord, 10);
             type = value > 0xFFFFFFFF ? "u64" : value > 0xFFFF ? "u32" : value > 0xFF ? "u16" : "u8";
           }
+
+          if (suffix) type = suffix;
 
           const md = new vscode.MarkdownString();
           md.appendMarkdown(`(${type}) ${value}\n\n`);
