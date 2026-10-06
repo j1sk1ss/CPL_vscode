@@ -1433,6 +1433,37 @@ class Parser {
     this.parseStatement();
   }
 
+  /**
+   * Matches a control-flow keyword that may be preceded by annotations.
+   *
+   * CPL permits annotations such as `@[fall]` before `else`, `case` and
+   * `default`. These annotations belong to the control-flow edge/label, not
+   * to the first statement in the following body, so they must not be stored
+   * in pendingAnnotations.
+   *
+   * If the annotations are not followed by the requested keyword, the parser
+   * is restored exactly to its previous position and normal annotation parsing
+   * is left to parseStatement().
+   */
+  private matchAnnotatedControlKeyword(keyword: "else" | "case" | "default"): string[] | undefined {
+    const savedIndex = this.i;
+    const savedIssueCount = this.issues.length;
+    const annotations: string[] = [];
+
+    this.skipInnerComments();
+    while (this.atRaw("punc", "@")) {
+      const ann = this.parseAnnotation();
+      if (ann) annotations.push(ann);
+      this.skipInnerComments();
+    }
+
+    if (this.match("kw", keyword)) return annotations;
+
+    this.i = savedIndex;
+    this.issues.length = savedIssueCount;
+    return undefined;
+  }
+
   private parseSwitchCaseBody() {
     // Comments between a case label and its body are switch trivia, not the
     // body statement itself.
@@ -2077,7 +2108,11 @@ class Parser {
 
       this.parseEmbeddedStatement(true);
 
-      if (this.match("kw", "else")) {
+      const elseAnnotations = this.matchAnnotatedControlKeyword("else");
+      if (elseAnnotations !== undefined) {
+        // Parsed for syntax only for now; semantic handling of control-flow
+        // annotations belongs to the backend/control-flow model.
+        void elseAnnotations;
         this.parseEmbeddedStatement(false);
       }
       return;
@@ -2104,14 +2139,20 @@ class Parser {
       this.expect("punc", "{", "switch: expected '{'");
 
       this.skipInnerComments();
-      while (this.match("kw", "case")) {
+      while (true) {
+        const caseAnnotations = this.matchAnnotatedControlKeyword("case");
+        if (caseAnnotations === undefined) break;
+        void caseAnnotations;
+
         this.parseLiteral();
         this.expect("punc", ";", "case: expected ';'");
         this.parseSwitchCaseBody();
         this.skipInnerComments();
       }
 
-      if (this.match("kw", "default")) {
+      const defaultAnnotations = this.matchAnnotatedControlKeyword("default");
+      if (defaultAnnotations !== undefined) {
+        void defaultAnnotations;
         this.match("punc", ";");
         this.parseSwitchCaseBody();
         this.skipInnerComments();

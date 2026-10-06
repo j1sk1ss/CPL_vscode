@@ -1245,6 +1245,12 @@ const annotationCompletions: AnnotationCompletion[] = [
     documentation: "Marks an `if` true branch or a switch `case` as cold for layout."
   },
   {
+    label: "fall",
+    insertText: "fall",
+    detail: "@[fall]",
+    documentation: "Control-flow annotation accepted before `else`, `else if`, and switch `case` labels."
+  },
+  {
     label: "not_lazy",
     insertText: "not_lazy",
     detail: "@[not_lazy]",
