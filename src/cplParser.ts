@@ -230,7 +230,7 @@ function valueRequiresExplicitRefForPtr(t: TypeNode): boolean {
 
 const OPERATORS = [
   "::",
-  "||=","&&=","<<",">>","==","!=","<=",">=","&&","||",
+  "||=","&&=","|~","<<",">>","==","!=","<=",">=","&&","||",
   "+=","-=","*=","/=","%=","|=","^=","&=","=",
   "+","-","*","/","%","|","^","&","<",">", "->", "=>", "..."
 ].sort((a,b) => b.length-a.length);
@@ -2644,7 +2644,17 @@ class Parser {
   }
   private parseShift(): ExprInfo {
     let e = this.parseAdd();
-    while (this.at("op") && (this.cur().text === "<<" || this.cur().text === ">>")) { this.i++; const r = this.parseAdd(); e = { type: { kind: "unknown" }, start: e.start, end: r.end }; }
+    while (this.at("op") && ["<<", ">>", "|~"].includes(this.cur().text)) {
+      this.i++;
+      const r = this.parseAdd();
+      e = {
+        // Binary bit-width operators are parsed here; exact arithmetic
+        // result typing is left to the compiler, as with << and >>.
+        type: { kind: "unknown" },
+        start: e.start,
+        end: r.end
+      };
+    }
     return e;
   }
   private parseAdd(): ExprInfo {

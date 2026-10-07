@@ -1328,6 +1328,21 @@ By convention, status 0 means success and a non-zero value means failure, althou
 Immediate process termination may bypass normal function returns and cleanup logic. Flush or close important resources explicitly when required by the runtime.`,
 
     // Addressing, operators and casts
+    "|~": `**\`|~\`** - sign-extends a value from a specified bit width.
+
+\`value |~ bits\` keeps the low \`bits\` bits of \`value\`, treats bit \`bits - 1\` as the sign bit, and extends that sign to the integer width used for the operation result.
+
+\`bits\` is a **bit count**, not a mask. For a \`W\`-bit integer, the operation is conceptually equivalent to shifting left by \`W - bits\` and then performing an arithmetic right shift by the same amount.
+
+\`\`\`cpl
+i16 all_ones = 0x1Fi16 |~ 5i16; : -1: low 5 bits are 11111 :
+i32 low_nibble = 1000i32 |~ 4i32; : -8: low 4 bits are 1000 :
+\`\`\`
+
+The useful range is \`1 <= bits <= width(result)\` for the integer width selected by the expression. This operator is intended for decoding packed instruction fields, immediates and other signed bit fields whose stored width is smaller than the CPL integer type used to hold them.
+
+Do not confuse \`|~\` with bitwise OR followed by bitwise NOT; it is a single CPL sign-extension operator.`,
+
     ref: `**ref** - obtains the address of an object.
 
 \`\`\`cpl
@@ -1585,6 +1600,16 @@ An array owns storage for all elements. A pointer stores only an address. Passin
     { language: "cpl", scheme: "file" },
     {
       provideHover(document, position) {
+        // Operators are not words, so handle the two-character sign-extension
+        // operator explicitly before using getWordRangeAtPosition().
+        const line = document.lineAt(position.line).text;
+        for (const start of [position.character - 1, position.character]) {
+          if (start >= 0 && line.slice(start, start + 2) === "|~") {
+            const range = new vscode.Range(position.line, start, position.line, start + 2);
+            return new vscode.Hover(new vscode.MarkdownString(docs["|~"]), range);
+          }
+        }
+
         const range = document.getWordRangeAtPosition(
           position,
           /0x[0-9a-fA-F]+(?:i8|i16|i32|i64|u8|u16|u32|u64)?|0b[01]+(?:i8|i16|i32|i64|u8|u16|u32|u64)?|\d+(?:i8|i16|i32|i64|u8|u16|u32|u64)|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|'[^']'|[A-Za-z_][A-Za-z0-9_]*/ 
