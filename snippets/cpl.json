@@ -286,7 +286,7 @@
     "scope": "cpl",
     "prefix": "straightann",
     "body": [
-      "@[straight]"
+      "@[select(straight)]"
     ],
     "description": "Switch linear-search annotation"
   },

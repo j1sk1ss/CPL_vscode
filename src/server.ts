@@ -1223,7 +1223,7 @@ const annotationCompletions: AnnotationCompletion[] = [
   {
     label: "straight",
     insertText: "straight",
-    detail: "@[straight]",
+    detail: "@[select(straight)]",
     documentation: "Forces linear switch selection instead of the default binary-search-style generation."
   },
   {
